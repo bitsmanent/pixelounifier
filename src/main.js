@@ -7,15 +7,15 @@ async function onEntity(handler) {
 	const rmqConfig = {
 		host: "rabbittest.pixelo.it",
 		port: 5672,
-		exchange: "Grabber",
-		queue: "normalizer"
+		vhost: "Grabber",
+		queue: "unifier"
 	};
 	const user = process.env.RMQUSER;
 	const pass = process.env.RMQPASS;
 	let conn, chan;
 
 	try {
-		conn = await amqp.connect(`amqp://${user}:${pass}@${rmqConfig.host}:${rmqConfig.port}/${rmqConfig.exchange}`);
+		conn = await amqp.connect(`amqp://${user}:${pass}@${rmqConfig.host}:${rmqConfig.port}/${rmqConfig.vhost}`);
 		chan = await conn.createChannel();
 	} catch(e) {
 		return e.message;
