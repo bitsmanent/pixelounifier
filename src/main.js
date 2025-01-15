@@ -1,9 +1,13 @@
 import dotenvx from "@dotenvx/dotenvx";
 import amqp from "amqplib";
 
-dotenvx.config();
+import {handleGroups} from "./handlers.js";
 
-async function onEntity(handler) {
+const messageHandlers  = {
+	groups: handleGroups
+};
+
+async function onMessage(handler) {
 	const rmqConfig = {
 		host: "rabbittest.pixelo.it",
 		port: 5672,
@@ -30,12 +34,22 @@ async function onEntity(handler) {
 	}, {noAck:false} /* preverve message */);
 }
 
-async function main() {
-	let totalEntities = 0;
+async function handleMessage(type, source, message) {
+	const handler = messageHandlers[type];
 
-	onEntity(entity => {
-		++totalEntities;
-		console.log("totalEntities: %s", totalEntities, entity);
+	if(!handler)
+		console.log("%s: unhandled message", type, message);
+	else
+		message = await handler(message, {type,source});
+	return message;
+}
+
+async function main() {
+	dotenvx.config();
+	onMessage(async message => {
+		const handled = await handleMessage(message.type, message.grabberName, message);
+
+		console.log("handled", handled);
 	});
 }
 
