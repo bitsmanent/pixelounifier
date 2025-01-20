@@ -1,13 +1,22 @@
 import dotenvx from "@dotenvx/dotenvx";
 import amqp from "amqplib";
 
-import {handleGroups} from "./handlers.js";
+import {
+	handleGroups,
+	handleCates,
+	handleManis
+} from "./handlers.js";
 
 dotenvx.config();
 
 const messageHandlers  = {
-	groups: handleGroups
+	groups: handleGroups,
+	cates: handleCates,
+	manis: handleManis
 };
+
+const queueLocks = {};
+const waitingQueue = {};
 
 async function onMessage(handler) {
 	const rmqConfig = {
@@ -36,9 +45,6 @@ async function onMessage(handler) {
 	}, {noAck:false} /* preserve message */);
 }
 
-const typeLocks = {};
-const waitingQueue = {};
-
 async function handleMessage(type, source, data) {
 	return new Promise(resolve => {
 		enqueueMessage(type, source, data, resolve);
@@ -46,20 +52,23 @@ async function handleMessage(type, source, data) {
 }
 
 async function enqueueMessage(type, source, data, resolve) {
-	if(typeLocks[type]) {
-		console.log("Type %s is being processed, queuing...", type);
+	/* TODO: lock by type+data.name.toLowerCase() or somethingk like this? */
+	const keyLock = type;
+
+	if(queueLocks[keyLock]) {
+		//console.log("Type %s is being processed, queuing...", type);
 		if(!waitingQueue[type])
 			waitingQueue[type] = [];
 		waitingQueue[type].push({type,source,data,resolve});
 		return;
 	}
-	typeLocks[type] = 1;
+	queueLocks[keyLock] = 1;
 
 	const handler = messageHandlers[type];
 	const ctx = {type,source};
 
 	if(!handler) {
-		delete typeLocks[type];
+		delete queueLocks[keyLock];
 		resolve(null);
 		return; // console.log("%s: unhandled message", type, data);
 	}
@@ -67,8 +76,7 @@ async function enqueueMessage(type, source, data, resolve) {
 	const r = await handler(data, ctx);
 
 	resolve(r);
-
-	delete typeLocks[type];
+	delete queueLocks[keyLock];
 
 	const queued = waitingQueue[type]?.shift();
 	if(queued)
