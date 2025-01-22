@@ -44,7 +44,8 @@ async function onMessage(handler) {
 		const content = JSON.parse(txt);
 
 		handler(content);
-	}, {/*noAck:false*/});
+		chan.ack(msg);
+	});
 }
 
 async function handleMessage(type, source, data) {
