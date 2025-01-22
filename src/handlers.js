@@ -204,9 +204,10 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 	for(const mani of manis) {
 		const sourceMani = sourceManis.find(x => x.external_id == mani.id);
 		const lowerManiName = mani.name.toLowerCase();
+		let maniId = sourceMani?.manifestation_id;
 
 		if(!sourceMani) {
-			let row, maniId, categoryId;
+			let row, categoryId;
 
 			[res, err] = await client.exec(`
 				SELECT id,category_id
@@ -260,7 +261,15 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 			console.log("DO NOTHING.");
 		}
 
-		/* XXX update events having NULL as manifestation_id */
+		/* update events having NULL as manifestation_id */
+		[res, err] = await client.exec(`
+			UPDATE events e SET manifestation_id = $1
+			FROM source_events se
+			WHERE se.event_id = e.id
+			AND e.manifestation_id IS NULL
+			AND se.external_manifestation_id = $2
+			AND se.source = $3
+		`, [maniId, mani.id, ctx.source]);
 	}
 	client.release();
 }
@@ -320,21 +329,12 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 		const home = participants.find(x => x.lowerName == lowerHome);
 		const away = participants.find(x => x.lowerName == lowerAway);
 
-		/* TODO: this match both A-B and B-A. There should be a
-		 * home/away column into the event_participants table. */
 		[res, err] = await client.exec(`
 			SELECT e.id
 			FROM events e
-			WHERE start_time = $1
-			AND EXISTS (
-				SELECT 1
-				FROM event_participants ep
-				WHERE ep.participant_id = ANY($2)
-				GROUP BY ep.event_id
-				HAVING COUNT(DISTINCT ep.participant_id) = array_length($2, 1)
-			)
-		`, [extEvent.date, [home.id, away.id]]);
-
+			JOIN source_events se ON se.event_id = e.id
+			WHERE se.source = $1 AND se.external_id = $2
+		`, [ctx.source, extEvent.id]);
 		if(err) {
 			console.log("Error: %s", err);
 			continue;
@@ -370,6 +370,15 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 				INSERT INTO event_participants (event_id, participant_id)
 				VALUES ($1, $2), ($1, $3)
 			`, [eventId, home.id, away.id]);
+			if(err) {
+				console.log("Error: %s", err);
+				continue;
+			}
+
+			[res, err] = await client.exec(`
+				INSERT INTO source_events (source, event_id, external_id, external_manifestation_id, name)
+				VALUES ($1, $2, $3, $4, $5)
+			`, [ctx.source, eventId, extEvent.id, extManiId, extEvent.name]);
 			if(err) {
 				console.log("Error: %s", err);
 				continue;
