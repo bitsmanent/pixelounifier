@@ -9,6 +9,48 @@
 
 import {getClient} from "./db.js";
 
+async function ensureNames(table, extNames) {
+	const client = await getClient();
+	const lowerNames = extNames.map(x => x .toLowerCase());
+	let res, err;
+
+	[res, err] = await client.exec(`
+		SELECT id,name,LOWER(name) as "lowerName"
+		FROM ${table}
+		WHERE LOWER(name) = ANY($1)
+	`, [lowerNames]);
+	if(err) {
+		console.log("Error: %s", err);
+		client.release();
+		return;
+	}
+
+	const names = res.rows;
+	const newNames = [...new Set(extNames.filter((_,i) => {
+		return !names.find(p => p.lowerName == lowerNames[i]);
+	}))];
+
+	if(newNames.length) {
+		const keys = [];
+		const vals = [];
+		newNames.forEach((name,i) => {
+			keys.push(`($${i+1})`);
+			vals.push(name);
+		});
+		[res, err] = await client.exec(`
+			INSERT INTO ${table} (name)
+			VALUES ${keys.join(',')}
+			RETURNING id,name
+		`, vals);
+		if(err)
+			return console.log("Error: %s", err);
+		res.rows.forEach(n => names.push(n));
+	}
+
+	client.release();
+	return names;
+}
+
 export async function handleGroups(groups, ctx) {
 	const client = await getClient();
 	const groupIds = groups.map(x => x.id);
@@ -274,52 +316,10 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 	client.release();
 }
 
-async function getMatchingParticipants(names) {
-	const client = await getClient();
-	const lowerNames = names.map(x => x .toLowerCase());
-	let res, err;
-
-	[res, err] = await client.exec(`
-		SELECT id,name,LOWER(name) as "lowerName"
-		FROM participants
-		WHERE LOWER(name) = ANY($1)
-	`, [lowerNames]);
-	if(err) {
-		console.log("Error: %s", err);
-		client.release();
-		return;
-	}
-
-	const participants = res.rows;
-	const newParticipants = [...new Set(names.filter((_,i) => {
-		return !participants.find(p => p.lowerName == lowerNames[i]);
-	}))];
-
-	if(newParticipants.length) {
-		const keys = [];
-		const vals = [];
-		newParticipants.forEach((name,i) => {
-			keys.push(`($${i+1})`);
-			vals.push(name);
-		});
-		[res, err] = await client.exec(`
-			INSERT INTO participants (name)
-			VALUES ${keys.join(',')}
-			RETURNING id,name
-		`, vals);
-		if(err)
-			return console.log("Error: %s", err);
-		res.rows.forEach(p => participants.push(p));
-	}
-
-	client.release();
-	return participants;
-}
-
 export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 	const client = await getClient();
 	const extPartNames = [...new Set(extEvents.map(x => ([x.homeTeam, x.awayTeam])).flat())];
-	const participants = await getMatchingParticipants(extPartNames); /* XXX getFoundOrCreatedParticipants() ?!?!?!? */
+	const participants = await ensureNames("participants", extPartNames);
 	let res, err;
 
 	participants.forEach(p => p.lowerName = p.name.toLowerCase()); /* for convenience */
@@ -388,4 +388,13 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 		}
 	}
 	client.release();
+}
+
+export async function handleClasses({classes:extMarkets}, ctx) {
+	console.log("handleClasses");
+	const names = extMarkets.map(x => x.name);
+	await ensureNames("markets", names);
+
+	/* XXX add/update source_markets */
+	void ctx;
 }
