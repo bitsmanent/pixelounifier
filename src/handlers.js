@@ -1,6 +1,13 @@
-import {getClient} from "./db.js";
+/*
+ * TODO:
+ *
+ * - split handlers into ad-hoc files
+ * - replace loop { queries, handle } with bulkQueries,loop { handle }
+ * - merge handlers into handleMessage() if possible
+ * - caching
+ */
 
-/* TODO: split handlers into ad-hoc files */
+import {getClient} from "./db.js";
 
 export async function handleGroups(groups, ctx) {
 	const client = await getClient();
@@ -171,6 +178,8 @@ export async function handleCates({groupId: extGroupId,cates}, ctx) {
 			AND sm.source = $3
 		`, [cateId, cate.id, ctx.source]);
 	}
+
+	client.release();
 }
 
 export async function handleManis({cateId: extCateId,manis}, ctx) {
@@ -251,5 +260,123 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 			console.log("DO NOTHING.");
 		}
 
+		/* XXX update events having NULL as manifestation_id */
 	}
+	client.release();
+}
+
+async function getMatchingParticipants(names) {
+	const client = await getClient();
+	const lowerNames = names.map(x => x .toLowerCase());
+	let res, err;
+
+	[res, err] = await client.exec(`
+		SELECT id,name,LOWER(name) as "lowerName"
+		FROM participants
+		WHERE LOWER(name) = ANY($1)
+	`, [lowerNames]);
+	if(err) {
+		console.log("Error: %s", err);
+		client.release();
+		return;
+	}
+
+	const participants = res.rows;
+	const newParticipants = [...new Set(names.filter((_,i) => {
+		return !participants.find(p => p.lowerName == lowerNames[i]);
+	}))];
+
+	if(newParticipants.length) {
+		const keys = [];
+		const vals = [];
+		newParticipants.forEach((name,i) => {
+			keys.push(`($${i+1})`);
+			vals.push(name);
+		});
+		[res, err] = await client.exec(`
+			INSERT INTO participants (name)
+			VALUES ${keys.join(',')}
+			RETURNING id,name
+		`, vals);
+		if(err)
+			return console.log("Error: %s", err);
+		res.rows.forEach(p => participants.push(p));
+	}
+
+	client.release();
+	return participants;
+}
+
+export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
+	const client = await getClient();
+	const extPartNames = [...new Set(extEvents.map(x => ([x.homeTeam, x.awayTeam])).flat())];
+	const participants = await getMatchingParticipants(extPartNames); /* XXX getFoundOrCreatedParticipants() ?!?!?!? */
+	let res, err;
+
+	participants.forEach(p => p.lowerName = p.name.toLowerCase()); /* for convenience */
+	for(const extEvent of extEvents) {
+		const lowerHome = extEvent.homeTeam.toLowerCase();
+		const lowerAway = extEvent.awayTeam.toLowerCase();
+		const home = participants.find(x => x.lowerName == lowerHome);
+		const away = participants.find(x => x.lowerName == lowerAway);
+
+		/* TODO: this match both A-B and B-A. There should be a
+		 * home/away column into the event_participants table. */
+		[res, err] = await client.exec(`
+			SELECT e.id
+			FROM events e
+			WHERE start_time = $1
+			AND EXISTS (
+				SELECT 1
+				FROM event_participants ep
+				WHERE ep.participant_id = ANY($2)
+				GROUP BY ep.event_id
+				HAVING COUNT(DISTINCT ep.participant_id) = array_length($2, 1)
+			)
+		`, [extEvent.date, [home.id, away.id]]);
+
+		if(err) {
+			console.log("Error: %s", err);
+			continue;
+		}
+		let eventId = res.rows[0]?.id;
+
+		if(!eventId) {
+			/* retrieve manifestation_id */
+			[res, err] = await client.exec(`
+				SELECT manifestation_id
+				FROM source_manifestations
+				WHERE external_id = $1
+			`, [extManiId]);
+			if(err) {
+				console.log("Error: %s", err);
+				continue;
+			}
+
+			const maniId = res.rows[0]?.manifestation_id;
+
+			[res, err] = await client.exec(`
+				INSERT into events (manifestation_id,start_time)
+				VALUES ($1, $2)
+				RETURNING id
+			`, [maniId, extEvent.date]);
+			if(err) {
+				console.log("Error: %s", err);
+				continue;
+			}
+			eventId = res.rows[0].id;
+
+			[res, err] = await client.exec(`
+				INSERT INTO event_participants (event_id, participant_id)
+				VALUES ($1, $2), ($1, $3)
+			`, [eventId, home.id, away.id]);
+			if(err) {
+				console.log("Error: %s", err);
+				continue;
+			}
+		} else {
+			/* TODO: Update event or participants if needed... */
+		}
+	}
+	client.release();
 }

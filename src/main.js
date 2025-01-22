@@ -4,7 +4,8 @@ import amqp from "amqplib";
 import {
 	handleGroups,
 	handleCates,
-	handleManis
+	handleManis,
+	handleEvents
 } from "./handlers.js";
 
 dotenvx.config();
@@ -12,7 +13,8 @@ dotenvx.config();
 const messageHandlers  = {
 	groups: handleGroups,
 	cates: handleCates,
-	manis: handleManis
+	manis: handleManis,
+	events: handleEvents
 };
 
 const queueLocks = {};
