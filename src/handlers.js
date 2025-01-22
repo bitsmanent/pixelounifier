@@ -346,7 +346,7 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 			[res, err] = await client.exec(`
 				SELECT manifestation_id
 				FROM source_manifestations
-				WHERE source = $1 AND external_id = $1
+				WHERE source = $1 AND external_id = $2
 			`, [ctx.source, extManiId]);
 			if(err) {
 				console.log("Error: %s", err);

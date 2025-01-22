@@ -44,7 +44,7 @@ async function onMessage(handler) {
 		const content = JSON.parse(txt);
 
 		handler(content);
-	}, {noAck:false} /* preserve message */);
+	}, {/*noAck:false*/});
 }
 
 async function handleMessage(type, source, data) {
