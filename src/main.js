@@ -6,7 +6,8 @@ import {
 	handleCates,
 	handleManis,
 	handleClasses,
-	handleEvents
+	handleEvents,
+	handleGames
 } from "./handlers.js";
 
 dotenvx.config();
@@ -16,7 +17,8 @@ const messageHandlers  = {
 	cates: handleCates,
 	manis: handleManis,
 	classes: handleClasses,
-	events: handleEvents
+	events: handleEvents,
+	games: handleGames
 };
 
 const queueLocks = {};

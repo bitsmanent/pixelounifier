@@ -130,7 +130,7 @@ export async function handleGroups(groups, ctx) {
 		} else if(sourceGroup.name.toLowerCase() != group.name.toLowerCase()) {
 			console.log("UPDATE source_groups", group);
 		} else {
-			console.log("DO NOTHING.");
+			//console.log("DO NOTHING.");
 		}
 
 		/* Update categories having NULL as group_id if any. */
@@ -225,7 +225,7 @@ export async function handleCates({groupId: extGroupId,cates}, ctx) {
 		else if(sourceCate.name.toLowerCase() != cate.name.toLowerCase()) {
 			console.log("UPDATE source_categories", cate);
 		} else {
-			console.log("DO NOTHING.");
+			//console.log("DO NOTHING.");
 		}
 
 		/* Update manifestations having NULL as category_id if any. */
@@ -318,7 +318,7 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 		} else if(sourceMani.name.toLowerCase() != mani.name.toLowerCase()) {
 			console.log("UPDATE source_manifestations", mani);
 		} else {
-			console.log("DO NOTHING.");
+			//console.log("DO NOTHING.");
 		}
 
 		/* update events having NULL as manifestation_id */
@@ -336,7 +336,7 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 
 export async function handleClasses({classes:extMarkets}, ctx) {
 	const client = await getClient();
-	const extMarketIds = extMarkets.map(x => x.id);
+	const extMarketIds = [...new Set(extMarkets.map(x => x.id))];
 	let res, err;
 
 	[res, err] = await client.exec(`
@@ -375,6 +375,7 @@ export async function handleClasses({classes:extMarkets}, ctx) {
 				market_id: market.id,
 				external_id: extMarket.id
 			});
+			continue;
 		}
 
 		/* TODO Update if needed... */
@@ -388,8 +389,131 @@ export async function handleClasses({classes:extMarkets}, ctx) {
 			console.log("Error: %s", err);
 	}
 
+	/* TODO: here we should handle source_outcomes having market_id NULL */
+
 	client.release();
 }
+
+export async function handleGames(extOutcomes, ctx) {
+	const client = await getClient();
+	const extOutcomeIds = [...new Set(extOutcomes.map(x => x.outcomeId))];
+	const extOutcomeNames = [...new Set(extOutcomes.map(x => x.outcomeName))];
+	const extMarketIds = [...new Set(extOutcomes.map(x => x.marketId))];
+	const extEventIds = [...new Set(extOutcomes.map(x => x.eventId))];
+	let res, err;
+
+	extOutcomes.forEach(x => {
+		extOutcomeIds.push(x.outcomeId);
+		extOutcomeNames.push(x.outcomeName);
+		extMarketIds.push(x.marketId);
+		extEventIds.push(x.eventId);
+	});
+
+	[res, err] = await client.exec(`
+		SELECT outcome_id,external_id
+		FROM source_outcomes
+		WHERE source = $1 AND external_id = ANY($2)
+	`, [ctx.source, extOutcomeIds]);
+	if(err) {
+		console.log("Error: %s", err);
+		client.release();
+		return;
+	}
+	const sourceOutcomes = res.rows;
+
+	[res, err] = await client.exec(`
+		SELECT market_id,external_id
+		FROM source_markets
+		WHERE source = $1 AND external_id = ANY($2)
+	`, [ctx.source, extMarketIds]);
+	if(err) {
+		console.log("Error: %s", err);
+		client.release();
+		return;
+	}
+	const sourceMarkets = res.rows;
+
+	[res, err] = await client.exec(`
+		SELECT event_id,external_id
+		FROM source_events
+		WHERE source = $1 AND external_id = ANY($2)
+	`, [ctx.source, extEventIds]);
+	if(err) {
+		console.log("Error: %s", err);
+		client.release();
+		return;
+	}
+	const sourceEvents = res.rows;
+
+	const outcomes = await ensureNames("outcomes", extOutcomeNames);
+	const newSourceOutcomes = [];
+	const eventOutcomesList = [];
+
+	outcomes.forEach(x => x.lowerName = x.name.toLowerCase()); /* for convenience */
+
+	for(const extOutcome of extOutcomes) {
+		const sourceOutcome = sourceOutcomes.find(x => x.external_id == extOutcome.outcomeId);
+		const sourceMarket = sourceMarkets.find(x => x.exernal_id == extOutcome.marketId);
+		const sourceEvent = sourceEvents.find(x => x.exernal_id == extOutcome.eventId);
+		const lowerName = extOutcome.outcomeName.toLowerCase();
+		const outcome = outcomes.find(x => x.lowerName == lowerName);
+
+		if(!sourceOutcome) {
+
+			if(!outcome) {
+				/* This should never happens since we already called ensureNames() */
+				console.log("Cannot find outcome for %s", extOutcome.outcomeName);
+				continue;
+			}
+
+			newSourceOutcomes.push({
+				source: ctx.source,
+				name: extOutcome.outcomeName,
+				value: extOutcome.odd,
+				outcome_id: outcome.id,
+				market_id: sourceMarket ? sourceMarket.market_id : null,
+				event_id: sourceEvent ? sourceEvent.event_id : null,
+				external_id: extOutcome.outcomeId,
+				external_market_id: extOutcome.marketId,
+				external_event_id: extOutcome.eventId
+			});
+		}
+		else {
+			/* TODO update sourceOutcome if needed... */
+		}
+
+		/* if fails then we got outcomes before the event or before the
+		 * market which is an out-of-order flow handled elsewhere like
+		 * in handleEvents() and handleMarkets() */
+		if(sourceEvent && sourceMarket && outcome) {
+			eventOutcomesList.push({
+				event_id: sourceEvent.event_id,
+				market_id: sourceMarket.market_id,
+				outcome_id: outcome.id
+			});
+		}
+	}
+
+	if(newSourceOutcomes.length) {
+		newSourceOutcomes.forEach(x => x.value = parseInt(x.value, 10)); /* XXX temp workaround */
+
+		[res, err] = await insertMani("source_outcomes", [
+			"source", "name", "value",
+			"outcome_id", "market_id", "event_id",
+			"external_id", "external_market_id", "external_event_id"
+			], newSourceOutcomes);
+		if(err)
+			console.log("Error: %s", err);
+	}
+
+	await processEventOutcomes(eventOutcomesList);
+	client.release();
+}
+
+async function processEventOutcomes(list) {
+	/* WIP... */
+}
+
 
 export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 	const client = await getClient();
@@ -462,5 +586,8 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 			/* TODO: Update event or participants if needed... */
 		}
 	}
+
+	/* TODO: here we should handle source_outcomes having event_id NULL */
+
 	client.release();
 }
