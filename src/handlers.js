@@ -5,9 +5,37 @@
  * - replace loop { queries, handle } with bulkQueries,loop { handle }
  * - merge handlers into handleMessage() if possible
  * - caching
+ * - improve strings matching (ignore accents, punctuation, etc.)
  */
 
 import {getClient} from "./db.js";
+
+async function insertMani(table, fields, items, primaryKey = "id") {
+	const client = await getClient();
+	const csvFields = fields.join(',');
+	const csvReturn = primaryKey ? [primaryKey, csvFields].join(',') : csvFields;
+	const sqlValues = [];
+	const values = [];
+	let valIndex = 0;
+
+	items.forEach(item => {
+		const curValues = [];
+		fields.forEach(fld => {
+			curValues.push(`$${++valIndex}`);
+			values.push(item[fld]);
+		});
+		sqlValues.push(`(${curValues.join(',')})`);
+	});
+
+	const [res, err] = await client.exec(`
+		INSERT INTO ${table} (${csvFields})
+		VALUES ${sqlValues}
+		RETURNING ${csvReturn}
+	`, values);
+
+	client.release();
+	return [res, err];
+}
 
 async function ensureNames(table, extNames) {
 	const client = await getClient();
@@ -31,17 +59,7 @@ async function ensureNames(table, extNames) {
 	}))];
 
 	if(newNames.length) {
-		const keys = [];
-		const vals = [];
-		newNames.forEach((name,i) => {
-			keys.push(`($${i+1})`);
-			vals.push(name);
-		});
-		[res, err] = await client.exec(`
-			INSERT INTO ${table} (name)
-			VALUES ${keys.join(',')}
-			RETURNING id,name
-		`, vals);
+		[res, err] = await insertMani(table, ["name"], newNames.map(name => ({name})));
 		if(err)
 			return console.log("Error: %s", err);
 		res.rows.forEach(n => names.push(n));
@@ -316,6 +334,63 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 	client.release();
 }
 
+export async function handleClasses({classes:extMarkets}, ctx) {
+	const client = await getClient();
+	const extMarketIds = extMarkets.map(x => x.id);
+	let res, err;
+
+	[res, err] = await client.exec(`
+		SELECT market_id,external_id
+		FROM source_markets
+		WHERE source = $1 AND external_id = ANY($2)
+	`, [ctx.source, extMarketIds]);
+	if(err) {
+		console.log("Error: %s", err);
+		client.release();
+		return;
+	}
+
+	const sourceMarkets = res.rows;
+	const newSourceMarkets = [];
+	const extMarketNames = extMarkets.map(x => x.name);
+	const markets = await ensureNames("markets", extMarketNames);
+
+	markets.forEach(x => x.lowerName = x.name.toLowerCase()); /* for convenience */
+	for(const extMarket of extMarkets) {
+		const sourceMarket = sourceMarkets.find(x => x.external_id == extMarket.id);
+		const lowerName = extMarket.name.toLowerCase();
+
+		if(!sourceMarket) {
+			const market = markets.find(x => x.lowerName == lowerName);
+
+			if(!market) {
+				/* This should never happens since we already called ensureNames() */
+				console.log("Cannot find marketId for %s", extMarket.name);
+				continue;
+			}
+
+			newSourceMarkets.push({
+				source: ctx.source,
+				name: extMarket.name,
+				market_id: market.id,
+				external_id: extMarket.id
+			});
+		}
+
+		/* TODO Update if needed... */
+	}
+
+	if(newSourceMarkets.length) {
+		[res, err] = await insertMani("source_markets",
+			["source", "name", "market_id", "external_id"],
+			newSourceMarkets);
+		if(err)
+			console.log("Error: %s", err);
+	}
+
+	client.release();
+}
+
 export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 	const client = await getClient();
 	const extPartNames = [...new Set(extEvents.map(x => ([x.homeTeam, x.awayTeam])).flat())];
@@ -388,13 +463,4 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 		}
 	}
 	client.release();
-}
-
-export async function handleClasses({classes:extMarkets}, ctx) {
-	console.log("handleClasses");
-	const names = extMarkets.map(x => x.name);
-	await ensureNames("markets", names);
-
-	/* XXX add/update source_markets */
-	void ctx;
 }
