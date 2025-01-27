@@ -6,6 +6,7 @@
  * - merge handlers into handleMessage() if possible
  * - caching
  * - improve strings matching (ignore accents, punctuation, etc.)
+ * - implement IDs for participants as well?
  */
 
 import {getClient} from "./db.js";
@@ -138,7 +139,7 @@ export async function handleGroups(groups, ctx) {
 			//console.log("DO NOTHING.");
 		}
 
-		/* Update categories having NULL as group_id if any. */
+		/* update categories having NULL as group_id if any. */
 		[res, err] = await client.exec(`
 			UPDATE categories c SET group_id = $1
 			FROM source_categories sc
@@ -394,7 +395,17 @@ export async function handleClasses({classes:extMarkets}, ctx) {
 			console.log("Error: %s", err);
 	}
 
-	/* TODO: here we should handle source_outcomes having market_id NULL */
+	/* update source_outcomes having market_id NULL */
+	[res, err] = await client.exec(`
+		UPDATE source_outcomes so SET market_id = sm.market_id
+		FROM source_markets sm
+		WHERE sm.external_id = so.external_market_id
+		AND sm.source = so.source
+		AND so.market_id IS NULL
+		AND sm.source = $1
+	`, [ctx.source]);
+	if(err)
+		console.log("Error: %s", err);
 
 	client.release();
 }
@@ -485,17 +496,20 @@ export async function handleGames(extOutcomes, ctx) {
 				continue;
 			}
 
-			newSourceOutcomes.push({
-				source: ctx.source,
-				name: extOutcome.outcomeName,
-				value: extOutcome.odd,
-				outcome_id: outcome.id,
-				market_id: sourceMarket ? sourceMarket.market_id : null,
-				event_id: sourceEvent ? sourceEvent.event_id : null,
-				external_id: extOutcome.outcomeId,
-				external_market_id: extOutcome.marketId,
-				external_event_id: extOutcome.eventId
-			});
+			const alreadyInserting = newSourceOutcomes.some(x => x.external_id == extOutcome.outcomeId);
+			if(!alreadyInserting) {
+				newSourceOutcomes.push({
+					source: ctx.source,
+					name: extOutcome.outcomeName,
+					value: extOutcome.odd,
+					outcome_id: outcome.id,
+					market_id: sourceMarket ? sourceMarket.market_id : null,
+					event_id: sourceEvent ? sourceEvent.event_id : null,
+					external_id: extOutcome.outcomeId,
+					external_market_id: extOutcome.marketId,
+					external_event_id: extOutcome.eventId
+				});
+			}
 		}
 		else {
 			/* TODO update sourceOutcome if needed... */
@@ -547,7 +561,20 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 	const client = await getClient();
 	const extPartNames = [...new Set(extEvents.map(x => ([x.homeTeam, x.awayTeam])).flat())];
 	const participants = await ensureNames("participants", extPartNames);
+	const newSourceParticipants = [];
 	let res, err;
+
+	[res, err] = await client.exec(`
+		SELECT name,participant_id,external_id
+		FROM source_participants
+		WHERE source = $1 AND participant_id = ANY($2)
+	`, [ctx.source, participants.map(x => x.id)]);
+	if(err) {
+		console.log("Error: %s", err);
+		client.release();
+		return;
+	}
+	const sourceParticipants = res.rows;
 
 	participants.forEach(p => p.lowerName = p.name.toLowerCase()); /* for convenience */
 	for(const extEvent of extEvents) {
@@ -613,9 +640,68 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 		} else {
 			/* TODO: Update event or participants if needed... */
 		}
+
+		let sourceParticipant;
+
+		sourceParticipant = sourceParticipants.find(x => x.participant_id == home.id);
+		if(!sourceParticipant) {
+			newSourceParticipants.push({
+				source: ctx.source,
+				participant_id: home.id,
+				name: home.name,
+				external_id: home.id /* XXX temp workaround */
+			});
+		} else {
+			/* TODO: update participant (name...?) */
+		}
+
+		sourceParticipant = sourceParticipants.find(x => x.participant_id == away.id);
+		if(!sourceParticipant) {
+			newSourceParticipants.push({
+				source: ctx.source,
+				participant_id: away.id,
+				name: away.name,
+				external_id: away.id /* XXX temp workaround */
+			});
+		} else {
+			/* TODO: update participant (name...?) */
+		}
+	}
+
+	if(newSourceParticipants.length) {
+		const uniqNSP = newSourceParticipants.reduce((acc,p) => {
+			if(!acc.found[p.participant_id]) {
+				acc.found[p.participant_id] = 1;
+				acc.uniq.push(p);
+			}
+			return acc;
+
+		}, {uniq:[],found:{}}).uniq;
+
+		/* TODO: ensure this actually happens */
+		if(uniqNSP.length != newSourceParticipants.length)
+			debugger;
+
+		[res, err] = await insertMany("source_participants", [
+			"source", "participant_id", "name", "external_id"
+			], uniqNSP, null);
+		if(err)
+			console.log("Error: %s", err);
 	}
 
 	/* TODO: here we should handle source_outcomes having event_id NULL */
+
+	/* update source_outcomes having event_id NULL */
+	[res, err] = await client.exec(`
+		UPDATE source_outcomes so SET event_id = se.event_id
+		FROM source_events se
+		WHERE se.external_id = so.external_event_id
+		AND se.source = so.source
+		AND so.event_id IS NULL
+		AND se.source = $1
+	`, [ctx.source]);
+	if(err)
+		console.log("Error: %s", err);
 
 	client.release();
 }
