@@ -10,13 +10,14 @@
 
 import {getClient} from "./db.js";
 
-async function insertMani(table, fields, items, primaryKey = "id") {
+async function insertMany(table, fields, items, primaryKey = "id") {
 	const client = await getClient();
 	const csvFields = fields.join(',');
-	const csvReturn = primaryKey ? [primaryKey, csvFields].join(',') : csvFields;
 	const sqlValues = [];
 	const values = [];
 	let valIndex = 0;
+	let csvReturn;
+	let returning = "";
 
 	items.forEach(item => {
 		const curValues = [];
@@ -27,10 +28,14 @@ async function insertMani(table, fields, items, primaryKey = "id") {
 		sqlValues.push(`(${curValues.join(',')})`);
 	});
 
+	if(primaryKey) {
+		csvReturn = [primaryKey, csvFields].join(',');
+		returning = `RETURNING ${csvReturn}`;
+	}
 	const [res, err] = await client.exec(`
 		INSERT INTO ${table} (${csvFields})
 		VALUES ${sqlValues}
-		RETURNING ${csvReturn}
+		${returning}
 	`, values);
 
 	client.release();
@@ -59,7 +64,7 @@ async function ensureNames(table, extNames) {
 	}))];
 
 	if(newNames.length) {
-		[res, err] = await insertMani(table, ["name"], newNames.map(name => ({name})));
+		[res, err] = await insertMany(table, ["name"], newNames.map(name => ({name})));
 		if(err)
 			return console.log("Error: %s", err);
 		res.rows.forEach(n => names.push(n));
@@ -382,7 +387,7 @@ export async function handleClasses({classes:extMarkets}, ctx) {
 	}
 
 	if(newSourceMarkets.length) {
-		[res, err] = await insertMani("source_markets",
+		[res, err] = await insertMany("source_markets",
 			["source", "name", "market_id", "external_id"],
 			newSourceMarkets);
 		if(err)
@@ -445,6 +450,20 @@ export async function handleGames(extOutcomes, ctx) {
 	}
 	const sourceEvents = res.rows;
 
+	const eventIds = [...new Set(sourceEvents.map(x => x.event_id))];
+	[res, err] = await client.exec(`
+		SELECT event_id,market_id,outcome_id
+		FROM event_outcomes
+		WHERE event_id = ANY($1)
+	`, [eventIds]);
+	if(err) {
+		console.log("Error: %s", err);
+		client.release();
+		return;
+	}
+	const eventOutcomes = res.rows;
+
+
 	const outcomes = await ensureNames("outcomes", extOutcomeNames);
 	const newSourceOutcomes = [];
 	const eventOutcomesList = [];
@@ -453,8 +472,8 @@ export async function handleGames(extOutcomes, ctx) {
 
 	for(const extOutcome of extOutcomes) {
 		const sourceOutcome = sourceOutcomes.find(x => x.external_id == extOutcome.outcomeId);
-		const sourceMarket = sourceMarkets.find(x => x.exernal_id == extOutcome.marketId);
-		const sourceEvent = sourceEvents.find(x => x.exernal_id == extOutcome.eventId);
+		const sourceMarket = sourceMarkets.find(x => x.external_id == extOutcome.marketId);
+		const sourceEvent = sourceEvents.find(x => x.external_id == extOutcome.eventId);
 		const lowerName = extOutcome.outcomeName.toLowerCase();
 		const outcome = outcomes.find(x => x.lowerName == lowerName);
 
@@ -486,18 +505,25 @@ export async function handleGames(extOutcomes, ctx) {
 		 * market which is an out-of-order flow handled elsewhere like
 		 * in handleEvents() and handleMarkets() */
 		if(sourceEvent && sourceMarket && outcome) {
-			eventOutcomesList.push({
-				event_id: sourceEvent.event_id,
-				market_id: sourceMarket.market_id,
-				outcome_id: outcome.id
-			});
+			const eventOutcome = eventOutcomes.find(x => x.event_id == sourceEvent.event_id
+				&& x.market_id == sourceMarket.market_id
+				&& x.outcome_id == outcome.id);
+
+			if(!eventOutcome) {
+				eventOutcomesList.push({
+					event_id: sourceEvent.event_id,
+					market_id: sourceMarket.market_id,
+					outcome_id: outcome.id,
+					value: 0
+				});
+			}
 		}
 	}
 
 	if(newSourceOutcomes.length) {
 		newSourceOutcomes.forEach(x => x.value = parseInt(x.value, 10)); /* XXX temp workaround */
 
-		[res, err] = await insertMani("source_outcomes", [
+		[res, err] = await insertMany("source_outcomes", [
 			"source", "name", "value",
 			"outcome_id", "market_id", "event_id",
 			"external_id", "external_market_id", "external_event_id"
@@ -506,14 +532,16 @@ export async function handleGames(extOutcomes, ctx) {
 			console.log("Error: %s", err);
 	}
 
-	await processEventOutcomes(eventOutcomesList);
+	if(eventOutcomesList.length) {
+		[res, err] = await insertMany("event_outcomes", [
+			"event_id", "market_id", "outcome_id", "value"
+			], eventOutcomesList, null);
+		if(err)
+			console.log("Error: %s", err);
+
+	}
 	client.release();
 }
-
-async function processEventOutcomes(list) {
-	/* WIP... */
-}
-
 
 export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 	const client = await getClient();
