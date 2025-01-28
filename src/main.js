@@ -39,7 +39,7 @@ async function onMessage(handler) {
 		conn = await amqp.connect(`amqp://${user}:${pass}@${rmqConfig.host}:${rmqConfig.port}/${rmqConfig.vhost}`);
 		chan = await conn.createChannel();
 	} catch(e) {
-		return handler({error:e.message});
+		return handler({type:"error",data:e.message});
 	}
 
 	await chan.assertQueue(rmqConfig.queue, {durable: true});
@@ -96,9 +96,9 @@ async function enqueueMessage(type, source, data, resolve) {
 
 async function main() {
 	process.on("uncaughtException", console.error);
-	onMessage(async ({type,source,data,error}) => {
-		if(error)
-			return console.error(error);
+	onMessage(async ({type,source,data}) => {
+		if(type == "error")
+			return console.error(data);
 		await handleMessage(type, source, data);
 	});
 }
