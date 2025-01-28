@@ -500,6 +500,8 @@ export async function handleGames(extOutcomes, ctx) {
 
 			const alreadyInserting = newSourceOutcomes.some(x => x.external_id == extOutcome.outcomeId);
 			if(!alreadyInserting) {
+				if(isNaN(parseInt(extOutcome.odd)))
+					debugger;
 				newSourceOutcomes.push({
 					source: ctx.source,
 					name: extOutcome.outcomeName,
