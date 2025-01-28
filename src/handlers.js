@@ -519,11 +519,15 @@ export async function handleGames(extOutcomes, ctx) {
 		 * market which is an out-of-order flow handled elsewhere like
 		 * in handleEvents() and handleMarkets() */
 		if(sourceEvent && sourceMarket && outcome) {
-			const eventOutcome = eventOutcomes.find(x => x.event_id == sourceEvent.event_id
+			const eventOutcome = eventOutcomes.some(x => x.event_id == sourceEvent.event_id
 				&& x.market_id == sourceMarket.market_id
 				&& x.outcome_id == outcome.id);
 
-			if(!eventOutcome) {
+			const alreadyInserting = eventOutcomesList.some(x => x.event_id == sourceEvent.event_id
+				&& x.market_id == sourceMarket.market_id
+				&& x.outcome_id == outcome.id);
+
+			if(!eventOutcome && !alreadyInserting) {
 				eventOutcomesList.push({
 					event_id: sourceEvent.event_id,
 					market_id: sourceMarket.market_id,
