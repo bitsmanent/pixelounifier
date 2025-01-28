@@ -38,6 +38,8 @@ async function insertMany(table, fields, items, primaryKey = "id") {
 		VALUES ${sqlValues}
 		${returning}
 	`, values);
+	if(err)
+		debugger;
 
 	client.release();
 	return [res, err];
