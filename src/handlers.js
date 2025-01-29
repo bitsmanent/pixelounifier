@@ -7,9 +7,71 @@
  * - caching
  * - improve strings matching (ignore accents, punctuation, etc.)
  * - implement IDs for participants as well?
+ * - handle enabled flag for games
  */
 
 import {getClient} from "./db.js";
+import {entityStatus} from "./lib.js";
+
+async function handleUpdates(updates) {
+	/*
+	 * TODO:
+	 *
+	 * Normalize
+	 * Send
+	 */
+	if(!updates.length)
+		return;
+	console.log(updates);
+}
+
+/* TODO: send outcome updates with generated value for CREATED or UPDATED */
+async function processEventOutcomes(eventOutcomes) {
+	const newEventOutcomes = eventOutcomes.filter(x => x.state == entityStatus.CREATED);
+	const updEventOutcomes = eventOutcomes.filter(x => x.state == entityStatus.UPDATED);
+	const client = await getClient();
+	const updates = [];
+	let res, err;
+
+	void updEventOutcomes; /* XXX currenty not implemented into the handlers */
+
+	/*
+	 * expected eventOutcomes as an array of: {
+	 * 	event_id
+	 * 	market_id
+	 * 	outcome_id
+	 * 	state (as of entityStatus)
+	 * }
+	*/
+
+
+	const tuples = eventOutcomes.map(x => [x.event_id, x.market_id, x.outcome_id]);
+	[res, err] = await client.exec(`
+		SELECT event_id,market_id,outcome_id,value
+		FROM source_outcomes
+		WHERE (event_id, market_id, outcome_id) = ANY($1)
+	`, [tuples]);
+	if(err) {
+		console.log("Error: %s", err);
+		client.release();
+		return;
+	}
+	const sourceOutcomes = res.rows;
+
+	/*
+	const data = games.map(game => ({
+		eventId: game.eventId,
+		marketId: game.marketId,
+		outcomeId: game.outcomeId,
+		outcomeName: game.outcomeName,
+		odd: game.odd,
+		enabled: game.enabled
+	}));
+	*/
+
+	client.release();
+	handleUpdates(updates);
+}
 
 async function insertMany(table, fields, items, primaryKey = "id") {
 	const client = await getClient();
@@ -70,7 +132,7 @@ async function ensureNames(table, extNames) {
 		[res, err] = await insertMany(table, ["name"], newNames.map(name => ({name})));
 		if(err)
 			return console.log("Error: %s", err);
-		res.rows.forEach(n => names.push(n));
+		res.rows.forEach(n => names.push({...n,isNew:true}));
 	}
 
 	client.release();
@@ -80,7 +142,8 @@ async function ensureNames(table, extNames) {
 export async function handleGroups(groups, ctx) {
 	const client = await getClient();
 	const groupIds = groups.map(x => x.id);
-	let res, err;
+	const updates = [];
+	let res, err, cur;
 
 	[res, err] = await client.exec(`
 		SELECT group_id,external_id,name
@@ -127,16 +190,38 @@ export async function handleGroups(groups, ctx) {
 					continue;
 				}
 				groupId = res.rows[0].id;
+
+				updates.push({
+					type: "group",
+					state: entityStatus.CREATED,
+					data: {
+						id: groupId,
+						name: group.name
+					}
+				});
 			}
 
 			[res, err] = await client.exec(`
 				INSERT INTO source_groups (source,name,group_id,external_id)
 				VALUES ($1, $2, $3, $4)
 			`, [ctx.source, group.name, groupId, group.id]);
-			if(err)
+			if(err) {
 				console.log("Error: %s", err);
+				continue;
+			}
 		} else if(sourceGroup.name.toLowerCase() != group.name.toLowerCase()) {
 			console.log("UPDATE source_groups", group);
+
+			/*
+			updates.push({
+				type: "group",
+				state: entityStatus.UPDATED,
+				data: {
+					id: groupId,
+					name: group.name
+				}
+			});
+			*/
 		} else {
 			//console.log("DO NOTHING.");
 		}
@@ -149,16 +234,46 @@ export async function handleGroups(groups, ctx) {
 			AND c.group_id IS NULL
 			AND sc.external_group_id = $2
 			AND sc.source = $3
+			RETURNING c.id,c.name
 		`, [groupId, group.id, ctx.source]);
+		if(err) {
+			console.log("Error: %s", err);
+			continue;
+		}
+		res.rows.forEach(row => {
+			updates.push({
+				type: "category",
+				state: entityStatus.CREATED,
+				data: {
+					id: row.id,
+					name: row.name,
+					groupId: groupId
+				}
+			});
+		});
 	}
-
 	client.release();
+	handleUpdates(updates);
 }
 
 export async function handleCates({groupId: extGroupId,cates}, ctx) {
 	const client = await getClient();
 	const cateIds = cates.map(x => x.id);
-	let res, err;
+	const updates = [];
+	let res, err, groupId;
+
+	[res, err] = await client.exec(`
+		SELECT group_id
+		FROM source_groups
+		WHERE source = $1 AND external_id = $2
+	`, [ctx.source, extGroupId]);
+	if(err) {
+		console.log("Error: %s", err);
+		client.release();
+		return;
+	}
+	if(res.rows.length)
+		groupId = res.rows[0].group_id;
 
 	[res, err] = await client.exec(`
 		SELECT category_id,external_id,name
@@ -180,10 +295,10 @@ export async function handleCates({groupId: extGroupId,cates}, ctx) {
 		let cateId = sourceCate?.category_id;
 
 		if(!sourceCate) {
-			let row, groupId;
+			let row, gid;
 
 			[res, err] = await client.exec(`
-				SELECT id,group_id
+				SELECT id
 				FROM categories
 				WHERE LOWER(name) = $1`, [lowerCateName]);
 			if(err) {
@@ -191,23 +306,7 @@ export async function handleCates({groupId: extGroupId,cates}, ctx) {
 				continue;
 			}
 
-			row = res.rows[0] || {};
-
-			[groupId, cateId] = [row.group_id, row.id];
-			if(!groupId) {
-				[res, err] = await client.exec(`
-					SELECT group_id
-					FROM source_groups
-					WHERE external_id = $1 AND source = $2
-				`, [extGroupId, ctx.source]);
-
-				if(err) {
-					console.log("Error: %s", err);
-					continue;
-				}
-				groupId = res.rows[0]?.group_id;
-			}
-
+			cateId = res.rows.length ? res.rows[0].id : null;
 			if(!cateId) {
 				[res, err] = await client.exec(`
 					INSERT INTO categories (name,group_id)
@@ -226,12 +325,39 @@ export async function handleCates({groupId: extGroupId,cates}, ctx) {
 				INSERT INTO source_categories (source,name,category_id,external_id,external_group_id)
 				VALUES ($1, $2, $3, $4, $5)
 			`, [ctx.source, cate.name, cateId, cate.id, extGroupId]);
-			if(err)
+			if(err) {
 				console.log("Error: %s", err);
+				continue;
+			}
+
+			/* do not send partial categories (wait for groupId first) */
+			if(groupId) {
+				updates.push({
+					type: "category",
+					state: entityStatus.CREATED,
+					data: {
+						id: cateId,
+						name: cate.name,
+						groupId: groupId
+					}
+				});
+			}
 
 		}
 		else if(sourceCate.name.toLowerCase() != cate.name.toLowerCase()) {
 			console.log("UPDATE source_categories", cate);
+
+			/*
+			updates.push({
+				type: "category",
+				state: entityStatus.UPDATED,
+				data: {
+					id: cateId,
+					name: cate.name,
+					groupId: groupId
+				}
+			});
+			*/
 		} else {
 			//console.log("DO NOTHING.");
 		}
@@ -244,16 +370,47 @@ export async function handleCates({groupId: extGroupId,cates}, ctx) {
 			AND m.category_id IS NULL
 			AND sm.external_category_id = $2
 			AND sm.source = $3
+			RETURNING m.id,m.name
 		`, [cateId, cate.id, ctx.source]);
+		if(err) {
+			console.log("Error: %s", err);
+			continue;
+		}
+		res.rows.forEach(row => {
+			updates.push({
+				type: "manifestation",
+				state: entityStatus.CREATED,
+				data: {
+					id: row.id,
+					name: row.name,
+					categoryId: cateId
+				}
+			});
+		});
 	}
-
 	client.release();
+	handleUpdates(updates);
 }
 
 export async function handleManis({cateId: extCateId,manis}, ctx) {
 	const client = await getClient();
 	const maniIds = manis.map(x => x.id);
-	let res, err;
+	const updates = [];
+	let cateId, res, err;
+
+	[res, err] = await client.exec(`
+		SELECT category_id
+		FROM source_categories
+		WHERE source = $1 AND external_id = $2
+	`, [ctx.source, extCateId]);
+	if(err) {
+		console.log("Error: %s", err);
+		client.release();
+		return;
+	}
+
+	if(res.rows.length)
+		cateId = res.rows[0].category_id;
 
 	[res, err] = await client.exec(`
 		SELECT manifestation_id,external_id,name
@@ -275,8 +432,6 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 		let maniId = sourceMani?.manifestation_id;
 
 		if(!sourceMani) {
-			let row, categoryId;
-
 			[res, err] = await client.exec(`
 				SELECT id,category_id
 				FROM manifestations
@@ -285,35 +440,30 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 				console.log("Error: %s", err);
 				continue;
 			}
-			row = res.rows[0] || {};
-
-			[categoryId, maniId] = [row.category_id, row.id];
-			if(!categoryId) {
-				[res, err] = await client.exec(`
-					SELECT category_id
-					FROM source_categories
-					WHERE external_id = $1 AND source = $2
-				`, [extCateId, ctx.source]);
-
-				if(err) {
-					console.log("Error: %s", err);
-					continue;
-				}
-				categoryId = res.rows[0]?.category_id;
-			}
+			maniId = res.rows.length ? res.rows[0].id : null;
 
 			if(!maniId) {
 				[res, err] = await client.exec(`
 					INSERT INTO manifestations (name,category_id)
 					VALUES ($1, $2)
 					RETURNING id
-				`, [mani.name, categoryId]);
+				`, [mani.name, cateId]);
 
 				if(err) {
 					console.log("Error: %s", err);
 					continue;
 				}
 				maniId = res.rows[0].id;
+
+				updates.push({
+					type: "manifestation",
+					state: entityStatus.CREATED,
+					data: {
+						id: maniId,
+						name: mani.name,
+						categoryId: cateId
+					}
+				});
 			}
 
 			[res, err] = await client.exec(`
@@ -325,6 +475,18 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 
 		} else if(sourceMani.name.toLowerCase() != mani.name.toLowerCase()) {
 			console.log("UPDATE source_manifestations", mani);
+			/*
+			updates.push({
+				type: "manifestation",
+				state: entityStatus.UPDATED,
+				data: {
+					id: maniId,
+					name: mani.name,
+					categoryId: cateId
+				}
+			});
+			*/
+
 		} else {
 			//console.log("DO NOTHING.");
 		}
@@ -337,14 +499,31 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 			AND e.manifestation_id IS NULL
 			AND se.external_manifestation_id = $2
 			AND se.source = $3
+			RETURNING e.id,e.start_time
 		`, [maniId, mani.id, ctx.source]);
+		if(err) {
+			console.log("Error: %s", err);
+			continue;
+		}
+		res.rows.forEach(row => {
+			updates.push({
+				type: "event",
+				state: entityStatus.CREATED,
+				data: {
+					id: row.id,
+					startTime: row.start_time
+				}
+			});
+		});
 	}
 	client.release();
+	handleUpdates(updates);
 }
 
 export async function handleClasses({classes:extMarkets}, ctx) {
 	const client = await getClient();
 	const extMarketIds = [...new Set(extMarkets.map(x => x.id))];
+	const updates = [];
 	let res, err;
 
 	[res, err] = await client.exec(`
@@ -367,26 +546,34 @@ export async function handleClasses({classes:extMarkets}, ctx) {
 	for(const extMarket of extMarkets) {
 		const sourceMarket = sourceMarkets.find(x => x.external_id == extMarket.id);
 		const lowerName = extMarket.name.toLowerCase();
+		const market = markets.find(x => x.lowerName == lowerName);
+
+		if(!market) {
+			/* This should never happens since we already called ensureNames() */
+			console.log("Cannot find marketId for %s", extMarket.name);
+			continue;
+		}
+
 
 		if(!sourceMarket) {
-			const market = markets.find(x => x.lowerName == lowerName);
-
-			if(!market) {
-				/* This should never happens since we already called ensureNames() */
-				console.log("Cannot find marketId for %s", extMarket.name);
-				continue;
-			}
-
 			newSourceMarkets.push({
 				source: ctx.source,
 				name: extMarket.name,
 				market_id: market.id,
 				external_id: extMarket.id
 			});
+			updates.push({
+				type: "market",
+				state: entityStatus.CREATED,
+				data: {
+					id: market.id,
+					name: market.name
+				}
+			});
 			continue;
 		}
 
-		/* TODO Update if needed... */
+		/* TODO update market if needed... */
 	}
 
 	if(newSourceMarkets.length) {
@@ -397,18 +584,62 @@ export async function handleClasses({classes:extMarkets}, ctx) {
 			console.log("Error: %s", err);
 	}
 
-	/* update source_outcomes having market_id NULL */
-	[res, err] = await client.exec(`
+	client.release();
+	handleUpdates(updates);
+	finalizeSourceOutcomes(ctx.source, "market_id");
+}
+
+async function finalizeSourceOutcomes(source, column) {
+	const client = await getClient();
+	let sql, res, err;
+
+	switch(column) {
+	case "event_id":
+		sql = `
+		UPDATE source_outcomes so SET event_id = se.event_id
+		FROM source_events se
+		WHERE se.external_id = so.external_event_id
+		AND se.source = so.source
+		AND so.event_id IS NULL
+		AND se.source = $1
+		`;
+		break;
+	case "market_id":
+		sql = `
 		UPDATE source_outcomes so SET market_id = sm.market_id
 		FROM source_markets sm
 		WHERE sm.external_id = so.external_market_id
 		AND sm.source = so.source
 		AND so.market_id IS NULL
 		AND sm.source = $1
-	`, [ctx.source]);
-	if(err)
-		console.log("Error: %s", err);
+		`;
+	}
 
+	sql += `RETURNING so.event_id,so.market_id,so.outcome_id,so.value`;
+
+	[res, err] = await client.exec(sql, [source]);
+	if(err)
+		return console.log("Error: %s", err);
+
+	const finalizedSourceOutcomes = res.rows.filter(x => x.market_id && x.event_id);
+	const newEventOutcomes = [];
+
+	for(const sourceOutcome of finalizedSourceOutcomes) {
+		newEventOutcomes.push({
+			event_id: sourceOutcome.event_id,
+			market_id: sourceOutcome.market_id,
+			outcome_id: sourceOutcome.outcome_id,
+			value: 0
+		});
+	}
+	if(newEventOutcomes.length) {
+		[res, err] = await insertMany("event_outcomes", [
+			"event_id", "market_id", "outcome_id", "value"
+			], newEventOutcomes, null);
+		if(err)
+			console.log("Error: %s", err);
+		processEventOutcomes(newEventOutcomes.map(x => ({...x,state:entityStatus.CREATED})));
+	}
 	client.release();
 }
 
@@ -418,6 +649,7 @@ export async function handleGames(extOutcomes, ctx) {
 	const extOutcomeNames = [...new Set(extOutcomes.map(x => x.outcomeName))];
 	const extMarketIds = [...new Set(extOutcomes.map(x => x.marketId))];
 	const extEventIds = [...new Set(extOutcomes.map(x => x.eventId))];
+	const updates = [];
 	let res, err;
 
 	extOutcomes.forEach(x => {
@@ -476,10 +708,9 @@ export async function handleGames(extOutcomes, ctx) {
 	}
 	const eventOutcomes = res.rows;
 
-
 	const outcomes = await ensureNames("outcomes", extOutcomeNames);
 	const newSourceOutcomes = [];
-	const eventOutcomesList = [];
+	const newEventOutcomes = [];
 
 	outcomes.forEach(x => x.lowerName = x.name.toLowerCase()); /* for convenience */
 
@@ -490,15 +721,15 @@ export async function handleGames(extOutcomes, ctx) {
 		const lowerName = extOutcome.outcomeName.toLowerCase();
 		const outcome = outcomes.find(x => x.lowerName == lowerName);
 
+		if(!outcome) {
+			/* This should never happens since we already called ensureNames() */
+			console.log("Cannot find outcome for %s", extOutcome.outcomeName);
+			continue;
+		}
+
 		if(!sourceOutcome) {
-
-			if(!outcome) {
-				/* This should never happens since we already called ensureNames() */
-				console.log("Cannot find outcome for %s", extOutcome.outcomeName);
-				continue;
-			}
-
 			const alreadyInserting = newSourceOutcomes.some(x => x.external_id == extOutcome.outcomeId);
+
 			if(!alreadyInserting) {
 				if(isNaN(parseInt(extOutcome.odd)))
 					debugger;
@@ -522,22 +753,31 @@ export async function handleGames(extOutcomes, ctx) {
 		/* if fails then we got outcomes before the event or before the
 		 * market which is an out-of-order flow handled elsewhere like
 		 * in handleEvents() and handleMarkets() */
-		if(sourceEvent && sourceMarket && outcome) {
+		if(sourceEvent && sourceMarket) {
 			const eventOutcome = eventOutcomes.some(x => x.event_id == sourceEvent.event_id
 				&& x.market_id == sourceMarket.market_id
 				&& x.outcome_id == outcome.id);
 
-			const alreadyInserting = eventOutcomesList.some(x => x.event_id == sourceEvent.event_id
-				&& x.market_id == sourceMarket.market_id
-				&& x.outcome_id == outcome.id);
+			if(!eventOutcome) {
+				const alreadyInserting = newEventOutcomes.some(x => x.event_id == sourceEvent.event_id
+					&& x.market_id == sourceMarket.market_id
+					&& x.outcome_id == outcome.id);
 
-			if(!eventOutcome && !alreadyInserting) {
-				eventOutcomesList.push({
+				if(alreadyInserting)
+					continue;
+				newEventOutcomes.push({
 					event_id: sourceEvent.event_id,
 					market_id: sourceMarket.market_id,
 					outcome_id: outcome.id,
-					value: 0
+					value: 0 /* computed in processEventOutcomes() */
 				});
+			} else {
+				/*
+				 * TODO: update outcome
+				 *
+				 * if(sourceEventOutcome.value != extOutcome.value)
+				 * 	updEventOutcomes.push({...});
+				*/
 			}
 		}
 	}
@@ -554,15 +794,16 @@ export async function handleGames(extOutcomes, ctx) {
 			console.log("Error: %s", err);
 	}
 
-	if(eventOutcomesList.length) {
+	if(newEventOutcomes.length) {
 		[res, err] = await insertMany("event_outcomes", [
 			"event_id", "market_id", "outcome_id", "value"
-			], eventOutcomesList, null);
+			], newEventOutcomes, null);
 		if(err)
 			console.log("Error: %s", err);
-
+		processEventOutcomes(newEventOutcomes.map(x => ({...x,state:entityStatus.CREATED})));
 	}
 	client.release();
+	handleUpdates(updates);
 }
 
 export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
@@ -570,6 +811,7 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 	const extPartNames = [...new Set(extEvents.map(x => ([x.homeTeam, x.awayTeam])).flat())];
 	const participants = await ensureNames("participants", extPartNames);
 	const newSourceParticipants = [];
+	const updates = [];
 	let res, err;
 
 	[res, err] = await client.exec(`
@@ -628,6 +870,15 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 			}
 			eventId = res.rows[0].id;
 
+			updates.push({
+				type: "event",
+				state: entityStatus.CREATED,
+				data: {
+					id: eventId,
+					startTime: extEvent.date
+				}
+			});
+
 			[res, err] = await client.exec(`
 				INSERT INTO event_participants (event_id, participant_id)
 				VALUES ($1, $2), ($1, $3)
@@ -646,7 +897,7 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 				continue;
 			}
 		} else {
-			/* TODO: Update event or participants if needed... */
+			/* TODO: Update event (start_time, etc.) or participants if needed... */
 		}
 
 		let sourceParticipant;
@@ -697,19 +948,7 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 			console.log("Error: %s", err);
 	}
 
-	/* TODO: here we should handle source_outcomes having event_id NULL */
-
-	/* update source_outcomes having event_id NULL */
-	[res, err] = await client.exec(`
-		UPDATE source_outcomes so SET event_id = se.event_id
-		FROM source_events se
-		WHERE se.external_id = so.external_event_id
-		AND se.source = so.source
-		AND so.event_id IS NULL
-		AND se.source = $1
-	`, [ctx.source]);
-	if(err)
-		console.log("Error: %s", err);
-
 	client.release();
+	handleUpdates(updates);
+	finalizeSourceOutcomes(ctx.source, "event_id");
 }

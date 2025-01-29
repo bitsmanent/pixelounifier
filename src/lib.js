@@ -24,6 +24,12 @@ export const entityTypes = {
 	OUTCOME: 7
 };
 
+export const entityStatus = {
+	CREATED: 1,
+	UPDATED: 2,
+	REMOVED: 3
+};
+
 export async function getMappedId(type, source, name) {
 	switch(type) {
 	case entityTypes.GROUP:
