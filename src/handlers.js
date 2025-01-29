@@ -44,13 +44,13 @@ async function processEventOutcomes(eventOutcomes) {
 	 * }
 	*/
 
-
 	const tuples = eventOutcomes.map(x => [x.event_id, x.market_id, x.outcome_id]);
+	const values = tuples.map((_, i) => `($${i * 3 + 1}::integer, $${i * 3 + 2}::integer, $${i * 3 + 3}::integer)`).join(',');
 	[res, err] = await client.exec(`
 		SELECT event_id,market_id,outcome_id,value
 		FROM source_outcomes
-		WHERE (event_id, market_id, outcome_id) = ANY($1)
-	`, [tuples]);
+		WHERE (event_id, market_id, outcome_id) = ANY(ARRAY[${values}])
+	`, tuples.flat());
 	if(err) {
 		console.log("Error: %s", err);
 		client.release();
