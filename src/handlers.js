@@ -10,7 +10,7 @@
  * - handle enabled flag for games
  */
 
-import {getClient} from "./db.js";
+import {getClient,insertMany} from "./db.js";
 import {entityStatus} from "./lib.js";
 
 async function handleUpdates(updates) {
@@ -71,40 +71,6 @@ async function processEventOutcomes(eventOutcomes) {
 
 	client.release();
 	handleUpdates(updates);
-}
-
-async function insertMany(table, fields, items, primaryKey = "id") {
-	const client = await getClient();
-	const csvFields = fields.join(',');
-	const sqlValues = [];
-	const values = [];
-	let valIndex = 0;
-	let csvReturn;
-	let returning = "";
-
-	items.forEach(item => {
-		const curValues = [];
-		fields.forEach(fld => {
-			curValues.push(`$${++valIndex}`);
-			values.push(item[fld]);
-		});
-		sqlValues.push(`(${curValues.join(',')})`);
-	});
-
-	if(primaryKey) {
-		csvReturn = [primaryKey, csvFields].join(',');
-		returning = `RETURNING ${csvReturn}`;
-	}
-	const [res, err] = await client.exec(`
-		INSERT INTO ${table} (${csvFields})
-		VALUES ${sqlValues}
-		${returning}
-	`, values);
-	if(err)
-		debugger;
-
-	client.release();
-	return [res, err];
 }
 
 async function ensureNames(table, extNames) {
