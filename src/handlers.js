@@ -11,18 +11,23 @@
  */
 
 import {getClient,insertMany} from "./db.js";
-import {entityStatus} from "./lib.js";
+import {entityStatus,sendUpdates} from "./lib.js";
 
 async function handleUpdates(updates) {
-	/*
-	 * TODO:
-	 *
-	 * Normalize
-	 * Send
-	 */
 	if(!updates.length)
 		return;
-	console.log(updates);
+
+	const groups = updates.reduce((acc, upd) => {
+		const groupName = upd.type+"s";
+		if(!acc[groupName])
+			acc[groupName] = [];
+		acc[groupName].push(upd);
+		return acc;
+	}, {});
+
+	Object.keys(groups).forEach(groupName => {
+		sendUpdates(groupName, groups[groupName]);
+	});
 }
 
 async function processEventOutcomes(eventOutcomes) {
