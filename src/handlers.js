@@ -56,6 +56,7 @@ async function processEventOutcomes(eventOutcomes) {
 		const eventSourceOutcomes = sourceOutcomes.filter(x => fltr(x, eventOutcome));
 		const avg = eventSourceOutcomes.reduce((acc, item) => acc + item.value, 0) / (eventSourceOutcomes.length || 1);
 
+		/* TODO: should not send updates if avg is the same */
 		updates.push({
 			type: "game",
 			state: eventOutcome.state,
@@ -64,7 +65,7 @@ async function processEventOutcomes(eventOutcomes) {
 				market_id: eventOutcome.market_id,
 				outcome_id: eventOutcome.outcome_id,
 				name: eventSourceOutcomes[0].name,
-				value: Math.round(avg)
+				value: avg
 			}
 		});
 	});
@@ -625,7 +626,7 @@ export async function handleGames(extOutcomes, ctx) {
 	});
 
 	[res, err] = await client.exec(`
-		SELECT outcome_id,external_id
+		SELECT outcome_id,external_id,value
 		FROM source_outcomes
 		WHERE source = $1 AND external_id = ANY($2)
 	`, [ctx.source, extOutcomeIds]);
@@ -676,6 +677,7 @@ export async function handleGames(extOutcomes, ctx) {
 	const outcomes = await ensureNames("outcomes", extOutcomeNames);
 	const newSourceOutcomes = [];
 	const newEventOutcomes = [];
+	const updEventOutcomes = [];
 
 	outcomes.forEach(x => x.lowerName = x.name.toLowerCase()); /* for convenience */
 
@@ -736,13 +738,14 @@ export async function handleGames(extOutcomes, ctx) {
 					outcome_id: outcome.id,
 					value: 0 /* computed in processEventOutcomes() */
 				});
-			} else {
-				/*
-				 * TODO: update outcome
-				 *
-				 * if(sourceEventOutcome.value != extOutcome.value)
-				 * 	updEventOutcomes.push({...});
-				*/
+			} else if(sourceOutcome) {
+				if(sourceOutcome.value != extOutcome.odd)
+					updEventOutcomes.push({
+						event_id: sourceEvent.event_id,
+						market_id: sourceMarket.market_id,
+						outcome_id: outcome.id,
+						value: 0 /* computed in processEventOutcomes() */
+					});
 			}
 		}
 	}
@@ -759,6 +762,8 @@ export async function handleGames(extOutcomes, ctx) {
 			console.log("Error: %s", err);
 	}
 
+	let eventToProcess = [];
+
 	if(newEventOutcomes.length) {
 		[res, err] = await insertMany("event_outcomes", [
 			"event_id", "market_id", "outcome_id", "value"
@@ -766,7 +771,13 @@ export async function handleGames(extOutcomes, ctx) {
 		if(err)
 			console.log("Error: %s", err);
 		processEventOutcomes(newEventOutcomes.map(x => ({...x,state:entityStatus.CREATED})));
+		eventToProcess = [...eventToProcess, ...newEventOutcomes.map(x => ({...x,state:entityStatus.CREATED}))];
 	}
+	if(updEventOutcomes)
+		eventToProcess = [...eventToProcess, ...updEventOutcomes.map(x => ({...x,state:entityStatus.UPDATED}))];
+
+	if(eventToProcess.length)
+		processEventOutcomes(eventToProcess);
 	client.release();
 }
 
