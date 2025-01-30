@@ -25,31 +25,21 @@ async function handleUpdates(updates) {
 	console.log(updates);
 }
 
-/* TODO: send outcome updates with generated value for CREATED or UPDATED */
 async function processEventOutcomes(eventOutcomes) {
-	const newEventOutcomes = eventOutcomes.filter(x => x.state == entityStatus.CREATED);
-	const updEventOutcomes = eventOutcomes.filter(x => x.state == entityStatus.UPDATED);
 	const client = await getClient();
 	const updates = [];
 	let res, err;
 
-	void updEventOutcomes; /* XXX currenty not implemented into the handlers */
-
-	/*
-	 * expected eventOutcomes as an array of: {
-	 * 	event_id
-	 * 	market_id
-	 * 	outcome_id
-	 * 	state (as of entityStatus)
-	 * }
-	*/
-
 	const tuples = eventOutcomes.map(x => [x.event_id, x.market_id, x.outcome_id]);
 	const values = tuples.map((_, i) => `($${i * 3 + 1}::integer, $${i * 3 + 2}::integer, $${i * 3 + 3}::integer)`).join(',');
+
+	/* Note: we must JOIN here to get the outcome name. This can be avoid
+	 * by sending names each time we get a new outcome. Also for markets. */
 	[res, err] = await client.exec(`
-		SELECT event_id,market_id,outcome_id,value
-		FROM source_outcomes
-		WHERE (event_id, market_id, outcome_id) = ANY(ARRAY[${values}])
+		SELECT so.event_id,so.market_id,so.outcome_id,so.value,oc.name as name
+		FROM source_outcomes so
+		JOIN outcomes oc ON oc.id = so.outcome_id
+		WHERE (so.event_id, so.market_id, so.outcome_id) = ANY(ARRAY[${values}])
 	`, tuples.flat());
 	if(err) {
 		console.log("Error: %s", err);
@@ -58,16 +48,26 @@ async function processEventOutcomes(eventOutcomes) {
 	}
 	const sourceOutcomes = res.rows;
 
-	/*
-	const data = games.map(game => ({
-		eventId: game.eventId,
-		marketId: game.marketId,
-		outcomeId: game.outcomeId,
-		outcomeName: game.outcomeName,
-		odd: game.odd,
-		enabled: game.enabled
-	}));
-	*/
+	eventOutcomes.forEach(eventOutcome => {
+		const fltr = (a,b) =>
+			a.event_id == b.event_id
+			&& a.market_id == b.market_id
+			&& a.outcome_id == b.outcome_id;
+		const eventSourceOutcomes = sourceOutcomes.filter(x => fltr(x, eventOutcome));
+		const avg = eventSourceOutcomes.reduce((acc, item) => acc + item.value, 0) / (eventSourceOutcomes.length || 1);
+
+		updates.push({
+			type: "game",
+			state: eventOutcome.state,
+			data: {
+				event_id: eventOutcome.event_id,
+				market_id: eventOutcome.market_id,
+				outcome_id: eventOutcome.outcome_id,
+				name: eventSourceOutcomes[0].name,
+				value: Math.round(avg)
+			}
+		});
+	});
 
 	client.release();
 	handleUpdates(updates);
@@ -649,7 +649,6 @@ export async function handleGames(extOutcomes, ctx) {
 	const extOutcomeNames = [...new Set(extOutcomes.map(x => x.outcomeName))];
 	const extMarketIds = [...new Set(extOutcomes.map(x => x.marketId))];
 	const extEventIds = [...new Set(extOutcomes.map(x => x.eventId))];
-	const updates = [];
 	let res, err;
 
 	extOutcomes.forEach(x => {
@@ -803,7 +802,6 @@ export async function handleGames(extOutcomes, ctx) {
 		processEventOutcomes(newEventOutcomes.map(x => ({...x,state:entityStatus.CREATED})));
 	}
 	client.release();
-	handleUpdates(updates);
 }
 
 export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
