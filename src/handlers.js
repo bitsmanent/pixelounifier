@@ -616,9 +616,9 @@ async function finalizeSourceOutcomes(source, column) {
 		});
 	}
 	if(newEventOutcomes.length) {
-		[res, err] = await insertMany("event_outcomes", [
-			"event_id", "market_id", "outcome_id", "value"
-			], newEventOutcomes, null);
+		[res, err] = await insertMany("event_outcomes",
+			["event_id", "market_id", "outcome_id", "value"],
+			newEventOutcomes, null);
 		if(err)
 			console.log("Error: %s", err);
 		processEventOutcomes(newEventOutcomes.map(x => ({...x,state:entityStatus.CREATED})));
@@ -775,7 +775,7 @@ export async function handleGames(extOutcomes, ctx) {
 			"source", "name", "value",
 			"outcome_id", "market_id", "event_id",
 			"external_id", "external_market_id", "external_event_id"
-			], newSourceOutcomes);
+		], newSourceOutcomes);
 		if(err)
 			console.log("Error: %s", err);
 	}
@@ -784,8 +784,8 @@ export async function handleGames(extOutcomes, ctx) {
 
 	if(newEventOutcomes.length) {
 		[res, err] = await insertMany("event_outcomes", [
-			"event_id", "market_id", "outcome_id", "value"
-			], newEventOutcomes, null);
+			"event_id", "market_id", "outcome_id", "value"],
+			newEventOutcomes, null);
 		if(err)
 			console.log("Error: %s", err);
 		processEventOutcomes(newEventOutcomes.map(x => ({...x,state:entityStatus.CREATED})));
@@ -934,9 +934,9 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 		if(uniqNSP.length != newSourceParticipants.length)
 			debugger;
 
-		[res, err] = await insertMany("source_participants", [
-			"source", "participant_id", "name", "external_id"
-			], uniqNSP, null);
+		[res, err] = await insertMany("source_participants",
+			["source", "participant_id", "name", "external_id"],
+			uniqNSP, null);
 		if(err)
 			console.log("Error: %s", err);
 	}
