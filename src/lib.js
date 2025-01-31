@@ -22,12 +22,12 @@ const matchStatus = {
 	ACTIVE: 1,
 	DISABLED: 2
 };
+*/
 
-const oddStatus = {
+export const outcomeStatus = {
 	ACTIVE: 1,
 	DISABLED: 2
 };
-*/
 
 const getIdData = {
 	lastNow: 0,

@@ -1,17 +1,16 @@
 /*
  * TODO:
  *
- * - split handlers into ad-hoc files
  * - replace loop { queries, handle } with bulkQueries,loop { handle }
- * - merge handlers into handleMessage() if possible
  * - caching
  * - improve strings matching (ignore accents, punctuation, etc.)
  * - implement IDs for participants as well?
  * - handle enabled flag for games
+ * - split handlers into ad-hoc files
  */
 
 import {getClient,insertMany} from "./db.js";
-import {entityStatus,sendUpdates} from "./lib.js";
+import {entityStatus,outcomeStatus,sendUpdates} from "./lib.js";
 
 async function handleUpdates(updates) {
 	if(!updates.length)
@@ -61,11 +60,14 @@ async function processEventOutcomes(eventOutcomes) {
 		const eventSourceOutcomes = sourceOutcomes.filter(x => fltr(x, eventOutcome));
 		const avg = eventSourceOutcomes.reduce((acc, item) => acc + item.value, 0) / (eventSourceOutcomes.length || 1);
 
+		const outcomeState = outcomeStatus.ACTIVE;
+
 		/* TODO: should not send updates if avg is the same */
 		updates.push({
 			type: "game",
 			state: eventOutcome.state,
 			data: {
+				state: outcomeState,
 				event_id: eventOutcome.event_id,
 				market_id: eventOutcome.market_id,
 				outcome_id: eventOutcome.outcome_id,
@@ -587,6 +589,8 @@ async function finalizeSourceOutcomes(source, column) {
 		`;
 	}
 
+	/* Note: RETURNING DISTINCT thrown a syntax error so we get rid of
+	 * duplicates later... */
 	sql += `RETURNING so.event_id,so.market_id,so.outcome_id,so.value`;
 
 	[res, err] = await client.exec(sql, [source]);
@@ -596,7 +600,14 @@ async function finalizeSourceOutcomes(source, column) {
 	const finalizedSourceOutcomes = res.rows.filter(x => x.market_id && x.event_id);
 	const newEventOutcomes = [];
 
+	const duplicated = {};
 	for(const sourceOutcome of finalizedSourceOutcomes) {
+		const k = [sourceOutcome.event_id, sourceOutcome.market_id, sourceOutcome.outcome_id].join('.');
+
+		if(duplicated[k])
+			continue;
+		duplicated[k] = 1;
+
 		newEventOutcomes.push({
 			event_id: sourceOutcome.event_id,
 			market_id: sourceOutcome.market_id,
@@ -700,7 +711,9 @@ export async function handleGames(extOutcomes, ctx) {
 		}
 
 		if(!sourceOutcome) {
-			const alreadyInserting = newSourceOutcomes.some(x => x.external_id == extOutcome.outcomeId);
+			const alreadyInserting = newSourceOutcomes.some(x => x.external_id == extOutcome.outcomeId
+				&& x.external_market_id == extOutcome.marketId
+				&& x.external_event_id == extOutcome.eventId);
 
 			if(!alreadyInserting) {
 				if(isNaN(parseInt(extOutcome.odd)))

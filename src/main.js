@@ -38,17 +38,31 @@ async function onMessage(handler) {
 	try {
 		conn = await amqp.connect(`amqp://${user}:${pass}@${rmqConfig.host}:${rmqConfig.port}/${rmqConfig.vhost}`);
 		chan = await conn.createChannel();
+		await chan.assertQueue(rmqConfig.queue, {durable: true});
 	} catch(e) {
 		return handler({type:"error",data:e.message});
 	}
 
-	await chan.assertQueue(rmqConfig.queue, {durable: true});
+	const processed = {};
 	chan.consume(rmqConfig.queue, msg => {
 		const txt = msg.content.toString();
 		const content = JSON.parse(txt);
 
-		handler(content);
 		chan.ack(msg);
+		if(processed[txt]) {
+			console.log("Skip message of type %s from %s...", content.type, content.source);
+			if(processed.tm)
+				clearTimeout(processed.tm);
+			processed.tm = setTimeout(() => {
+				processed.tm = 0;
+				console.log("Clearing duplicate cache after 200ms...");
+			}, 200);
+			return;
+		}
+		processed[txt] = 1;
+
+
+		handler(content);
 	});
 }
 
@@ -59,18 +73,19 @@ async function handleMessage(type, source, data) {
 }
 
 async function enqueueMessage(type, source, data, resolve) {
-	/* TODO: lock by type+data.name.toLowerCase() or somethingk like this? */
-	//const keyLock = type;
-
-	/* TODO: this slow down a lot. We should find a way to handle
-	 * concurrent messages mainly for handleGames() which don't fill the
-	 * source_outcomes market_id and event_id properly sometimes. */
-	const keyLock = "sequential";
+	//const keyLock = "sequential";
+	const keyLock = type;
 
 	if(queueLocks[keyLock]) {
 		if(!waitingQueue[keyLock])
 			waitingQueue[keyLock] = [];
 		waitingQueue[keyLock].push({type,source,data,resolve});
+		console.log("Queued message of type %s from %s (%s/%s)...",
+			type,
+			source,
+			waitingQueue[keyLock].length,
+			Object.values(waitingQueue).reduce((sum,q) => sum += q.length, 0)
+		);
 		return;
 	}
 	queueLocks[keyLock] = 1;
@@ -80,8 +95,7 @@ async function enqueueMessage(type, source, data, resolve) {
 
 	if(!handler) {
 		delete queueLocks[keyLock];
-		resolve(null);
-		return; // console.log("%s: unhandled message", type, data);
+		return resolve(null);
 	}
 
 	const r = await handler(data, ctx);
@@ -90,8 +104,17 @@ async function enqueueMessage(type, source, data, resolve) {
 	delete queueLocks[keyLock];
 
 	const queued = waitingQueue[keyLock]?.shift();
-	if(queued)
+
+	if(queued) {
+		console.log("Dequeued a message of type %s from %s (%s/%s)...",
+			queued.type,
+			queued.source,
+			waitingQueue[keyLock].length,
+			Object.values(waitingQueue).reduce((sum,q) => sum += q.length, 0)
+		);
+
 		await enqueueMessage(queued.type, queued.source, queued.data, queued.resolve);
+	}
 }
 
 async function main() {
@@ -99,6 +122,7 @@ async function main() {
 	onMessage(async ({type,source,data}) => {
 		if(type == "error")
 			return console.error(data);
+		console.log("Handle message of type %s from %s", type, source);
 		await handleMessage(type, source, data);
 	});
 }
