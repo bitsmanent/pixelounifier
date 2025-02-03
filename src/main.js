@@ -121,7 +121,7 @@ async function main() {
 	process.on("uncaughtException", console.error);
 	onMessage(async ({type,source,data}) => {
 		if(type == "error")
-			return console.error(data);
+			return console.error("onMessage() error", data);
 		console.log("Handle message of type %s from %s", type, source);
 		await handleMessage(type, source, data);
 	});

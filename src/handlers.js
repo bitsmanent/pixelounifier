@@ -769,8 +769,6 @@ export async function handleGames(extOutcomes, ctx) {
 	}
 
 	if(newSourceOutcomes.length) {
-		newSourceOutcomes.forEach(x => x.value = parseInt(x.value, 10)); /* XXX temp workaround */
-
 		[res, err] = await insertMany("source_outcomes", [
 			"source", "name", "value",
 			"outcome_id", "market_id", "event_id",
@@ -901,7 +899,7 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 				source: ctx.source,
 				participant_id: home.id,
 				name: home.name,
-				external_id: home.id /* XXX temp workaround */
+				external_id: extEvent.homeTeamId /* Note: may be 0 (e.g. for unibet) */
 			});
 		} else {
 			/* TODO: update participant (name...?) */
@@ -913,7 +911,7 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 				source: ctx.source,
 				participant_id: away.id,
 				name: away.name,
-				external_id: away.id /* XXX temp workaround */
+				external_id: extEvent.awayTeamId /* Note: may be 0 (e.g. for unibet) */
 			});
 		} else {
 			/* TODO: update participant (name...?) */
