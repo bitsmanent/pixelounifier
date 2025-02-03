@@ -919,6 +919,7 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 	}
 
 	if(newSourceParticipants.length) {
+		/*
 		const uniqNSP = newSourceParticipants.reduce((acc,p) => {
 			if(!acc.found[p.participant_id]) {
 				acc.found[p.participant_id] = 1;
@@ -928,13 +929,14 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 
 		}, {uniq:[],found:{}}).uniq;
 
-		/* TODO: ensure this actually happens */
+		// TODO: ensure this actually happens
 		if(uniqNSP.length != newSourceParticipants.length)
 			debugger;
+		*/
 
 		[res, err] = await insertMany("source_participants",
 			["source", "participant_id", "name", "external_id"],
-			uniqNSP, null);
+			newSourceParticipants, null);
 		if(err)
 			console.log("Error: %s", err);
 	}
