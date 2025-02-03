@@ -17,7 +17,7 @@ async function handleUpdates(updates) {
 		return;
 
 	const groups = updates.reduce((acc, upd) => {
-		const groupName = upd.type+"s";
+		const groupName = upd.type+"_list";
 		if(!acc[groupName])
 			acc[groupName] = [];
 		acc[groupName].push(upd);
