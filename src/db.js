@@ -34,8 +34,7 @@ export async function getClient() {
 	return client;
 }
 
-export async function insertMany(table, fields, items, primaryKey = "id") {
-	const client = await getClient();
+function buildInsertMany(table, fields, items, primaryKey = "id") {
 	const csvFields = fields.join(',');
 	const sqlValues = [];
 	const values = [];
@@ -56,13 +55,60 @@ export async function insertMany(table, fields, items, primaryKey = "id") {
 		csvReturn = [primaryKey, csvFields].join(',');
 		returning = `RETURNING ${csvReturn}`;
 	}
-	const [res, err] = await client.exec(`
+	const sql = `
 		INSERT INTO ${table} (${csvFields})
 		VALUES ${sqlValues}
 		${returning}
-	`, values);
-	if(err)
-		debugger;
+	`;
+
+	return [sql, values];
+}
+
+export async function insertMany(table, fields, items, primaryKey = "id", reuseClient) {
+	const client = reuseClient || await getClient();
+	const [sql, values] = buildInsertMany(table, fields, items, primaryKey);
+	const [res, err] = await client.exec(sql, values);
+
+	if(!reuseClient)
+		client.release();
+	return [res, err];
+}
+
+export async function updateMany(table, fields, items, primaryKey = "id") {
+	const client = await getClient();
+	const tempTable = "temp_table";
+	const untypedFields = fields.map(x => x.split(':')[0]);
+	const tempFields = [
+		`${primaryKey} INT`,
+		...untypedFields.map(x => `${x} TEXT`),
+	].join(',');
+	const setFields = untypedFields.map((x,i) => `${x} = tmp.${fields[i]}`).join(',');
+	let res, err;
+
+	try {
+		[res, err] = await client.exec("BEGIN");
+		if(err) throw err;
+
+		[res, err] = await client.exec(`CREATE TEMP TABLE ${tempTable} (${tempFields}) ON COMMIT DROP`);
+		if(err) throw err;
+
+		[res, err] = await insertMany(tempTable, [primaryKey, ...untypedFields], items, null, client);
+		if(err) throw err;
+
+		[res, err] = await client.exec(`
+			UPDATE ${table} AS t
+			SET ${setFields}
+			FROM ${tempTable} AS tmp
+			WHERE t.${primaryKey} = tmp.${primaryKey}
+		`);
+		if(err) throw err;
+
+		await client.query("COMMIT");
+	} catch(e) {
+		await client.query("ROLLBACK");
+		res = null;
+		err = e;
+	}
 
 	client.release();
 	return [res, err];

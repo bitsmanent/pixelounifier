@@ -4,12 +4,11 @@
  * - replace loop { queries, handle } with bulkQueries,loop { handle }
  * - caching
  * - improve strings matching (ignore accents, punctuation, etc.)
- * - implement IDs for participants as well?
  * - handle enabled flag for games
  * - split handlers into ad-hoc files
  */
 
-import {getClient,insertMany} from "./db.js";
+import {getClient,insertMany,updateMany} from "./db.js";
 import {entityStatus,outcomeStatus,sendUpdates} from "./lib.js";
 
 async function handleUpdates(updates) {
@@ -642,7 +641,7 @@ export async function handleGames(extOutcomes, ctx) {
 	});
 
 	[res, err] = await client.exec(`
-		SELECT outcome_id,external_id,value
+		SELECT id,outcome_id,external_id,value
 		FROM source_outcomes
 		WHERE source = $1 AND external_id = ANY($2)
 	`, [ctx.source, extOutcomeIds]);
@@ -693,7 +692,8 @@ export async function handleGames(extOutcomes, ctx) {
 	const outcomes = await ensureNames("outcomes", extOutcomeNames);
 	const newSourceOutcomes = [];
 	const newEventOutcomes = [];
-	const updEventOutcomes = [];
+	const updSourceOutcomes = [];
+	let eventToProcess = [];
 
 	outcomes.forEach(x => x.lowerName = x.name.toLowerCase()); /* for convenience */
 
@@ -732,7 +732,12 @@ export async function handleGames(extOutcomes, ctx) {
 			}
 		}
 		else {
-			/* TODO update sourceOutcome if needed... */
+			if(sourceOutcome.value != extOutcome.odd) {
+				updSourceOutcomes.push({
+					id: sourceOutcome.id,
+					value: extOutcome.odd
+				});
+			}
 		}
 
 		/* if fails then we got outcomes before the event or before the
@@ -757,13 +762,14 @@ export async function handleGames(extOutcomes, ctx) {
 					value: 0 /* computed in processEventOutcomes() */
 				});
 			} else if(sourceOutcome) {
-				if(sourceOutcome.value != extOutcome.odd)
-					updEventOutcomes.push({
+				if(sourceOutcome.value != extOutcome.odd) {
+					eventToProcess.push({
 						event_id: sourceEvent.event_id,
 						market_id: sourceMarket.market_id,
 						outcome_id: outcome.id,
-						value: 0 /* computed in processEventOutcomes() */
+						state: entityStatus.UPDATED
 					});
+				}
 			}
 		}
 	}
@@ -778,7 +784,12 @@ export async function handleGames(extOutcomes, ctx) {
 			console.log("Error: %s", err);
 	}
 
-	let eventToProcess = [];
+	if(updSourceOutcomes.length) {
+		[res, err] = await updateMany("source_outcomes", ["value::integer"], updSourceOutcomes, "id");
+		if(err)
+			console.log("Error: %s", err);
+
+	}
 
 	if(newEventOutcomes.length) {
 		[res, err] = await insertMany("event_outcomes", [
@@ -789,8 +800,6 @@ export async function handleGames(extOutcomes, ctx) {
 		processEventOutcomes(newEventOutcomes.map(x => ({...x,state:entityStatus.CREATED})));
 		eventToProcess = [...eventToProcess, ...newEventOutcomes.map(x => ({...x,state:entityStatus.CREATED}))];
 	}
-	if(updEventOutcomes)
-		eventToProcess = [...eventToProcess, ...updEventOutcomes.map(x => ({...x,state:entityStatus.UPDATED}))];
 
 	if(eventToProcess.length)
 		processEventOutcomes(eventToProcess);
