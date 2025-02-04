@@ -74,15 +74,17 @@ export async function insertMany(table, fields, items, primaryKey = "id", reuseC
 	return [res, err];
 }
 
-export async function updateMany(table, fields, items, primaryKey = "id") {
+export async function updateMany(table, fields, items, primaryKeyOrKeys = "id") {
 	const client = await getClient();
 	const tempTable = "temp_table";
 	const untypedFields = fields.map(x => x.split(':')[0]);
+	const primaryKeys = typeof primaryKeyOrKeys == "string" ? [primaryKeyOrKeys] : primaryKeyOrKeys;
 	const tempFields = [
-		`${primaryKey} INT`,
+		...primaryKeys.map(x => `${x} INT`),
 		...untypedFields.map(x => `${x} TEXT`),
 	].join(',');
 	const setFields = untypedFields.map((x,i) => `${x} = tmp.${fields[i]}`).join(',');
+	const whereClause = primaryKeys.map(x => `t.${x} = tmp.${x}`).join(" AND ");
 	let res, err;
 
 	try {
@@ -92,14 +94,14 @@ export async function updateMany(table, fields, items, primaryKey = "id") {
 		[res, err] = await client.exec(`CREATE TEMP TABLE ${tempTable} (${tempFields}) ON COMMIT DROP`);
 		if(err) throw err;
 
-		[res, err] = await insertMany(tempTable, [primaryKey, ...untypedFields], items, null, client);
+		[res, err] = await insertMany(tempTable, [...primaryKeys, ...untypedFields], items, null, client);
 		if(err) throw err;
 
 		[res, err] = await client.exec(`
 			UPDATE ${table} AS t
 			SET ${setFields}
 			FROM ${tempTable} AS tmp
-			WHERE t.${primaryKey} = tmp.${primaryKey}
+			WHERE ${whereClause}
 		`);
 		if(err) throw err;
 

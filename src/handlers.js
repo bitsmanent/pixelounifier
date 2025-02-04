@@ -39,9 +39,14 @@ async function processEventOutcomes(eventOutcomes) {
 	/* Note: we must JOIN here to get the outcome name. This can be avoid
 	 * by sending names each time we get a new outcome. Also for markets. */
 	[res, err] = await client.exec(`
-		SELECT so.event_id,so.market_id,so.outcome_id,so.value,oc.name as name
+		SELECT so.event_id,so.market_id,so.outcome_id,so.value
+		,oc.name as name,ec.value as ecvalue
 		FROM source_outcomes so
 		JOIN outcomes oc ON oc.id = so.outcome_id
+		JOIN event_outcomes ec
+			ON ec.event_id = so.event_id
+			AND ec.market_id = so.market_id
+			AND ec.outcome_id = so.outcome_id
 		WHERE (so.event_id, so.market_id, so.outcome_id) = ANY(ARRAY[${values}])
 	`, tuples.flat());
 	if(err) {
@@ -50,6 +55,7 @@ async function processEventOutcomes(eventOutcomes) {
 		return;
 	}
 	const sourceOutcomes = res.rows;
+	const updEventOutcomes = [];
 
 	eventOutcomes.forEach(eventOutcome => {
 		const fltr = (a,b) =>
@@ -57,11 +63,12 @@ async function processEventOutcomes(eventOutcomes) {
 			&& a.market_id == b.market_id
 			&& a.outcome_id == b.outcome_id;
 		const eventSourceOutcomes = sourceOutcomes.filter(x => fltr(x, eventOutcome));
-		const avg = eventSourceOutcomes.reduce((acc, item) => acc + item.value, 0) / (eventSourceOutcomes.length || 1);
-
+		const avg = Math.round(eventSourceOutcomes.reduce((acc, item) => acc + item.value, 0) / (eventSourceOutcomes.length || 1));
 		const outcomeState = outcomeStatus.ACTIVE;
 
-		/* TODO: should not send updates if avg is the same */
+		if(avg == eventOutcome.ecvalue)
+			return;
+
 		updates.push({
 			type: "game",
 			state: eventOutcome.state,
@@ -74,7 +81,19 @@ async function processEventOutcomes(eventOutcomes) {
 				value: avg
 			}
 		});
+		updEventOutcomes.push({
+			event_id: eventOutcome.event_id,
+			market_id: eventOutcome.market_id,
+			outcome_id: eventOutcome.outcome_id,
+			value: avg
+		});
 	});
+
+	if(updEventOutcomes.length) {
+		[res, err] = await updateMany("event_outcomes", ["value::integer"], updEventOutcomes, ["event_id", "market_id", "outcome_id"]);
+		if(err)
+			console.log("Error: %s", err);
+	}
 
 	client.release();
 	handleUpdates(updates);
@@ -641,7 +660,7 @@ export async function handleGames(extOutcomes, ctx) {
 	});
 
 	[res, err] = await client.exec(`
-		SELECT id,outcome_id,external_id,value
+		SELECT id,event_id,market_id,outcome_id,value
 		FROM source_outcomes
 		WHERE source = $1 AND external_id = ANY($2)
 	`, [ctx.source, extOutcomeIds]);
@@ -698,9 +717,6 @@ export async function handleGames(extOutcomes, ctx) {
 	outcomes.forEach(x => x.lowerName = x.name.toLowerCase()); /* for convenience */
 
 	for(const extOutcome of extOutcomes) {
-		const sourceOutcome = sourceOutcomes.find(x => x.external_id == extOutcome.outcomeId);
-		const sourceMarket = sourceMarkets.find(x => x.external_id == extOutcome.marketId);
-		const sourceEvent = sourceEvents.find(x => x.external_id == extOutcome.eventId);
 		const lowerName = extOutcome.outcomeName.toLowerCase();
 		const outcome = outcomes.find(x => x.lowerName == lowerName);
 
@@ -709,6 +725,13 @@ export async function handleGames(extOutcomes, ctx) {
 			console.log("Cannot find outcome for %s", extOutcome.outcomeName);
 			continue;
 		}
+
+		const sourceMarket = sourceMarkets.find(x => x.external_id == extOutcome.marketId);
+		const sourceEvent = sourceEvents.find(x => x.external_id == extOutcome.eventId);
+		const sourceOutcome = sourceOutcomes.find(x =>
+			x.event_id == sourceEvent.event_id
+			&& x.market_id == sourceMarket.market_id
+			&& x.outcome_id == outcome.id);
 
 		if(!sourceOutcome) {
 			const alreadyInserting = newSourceOutcomes.some(x => x.external_id == extOutcome.outcomeId
