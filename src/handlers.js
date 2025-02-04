@@ -495,16 +495,42 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 			console.log("Error: %s", err);
 			continue;
 		}
-		res.rows.forEach(row => {
-			updates.push({
-				type: "event",
-				state: entityStatus.CREATED,
-				data: {
-					id: row.id,
-					startTime: row.start_time
-				}
+		const sourceEvents = res.rows;
+
+		/*
+		[res, err] = await client.exec(`
+			SELECT g.name AS groupname,c.name AS categoryname,m.name AS manifestationname
+			FROM groups g
+			JOIN manifestations m ON m.id = $1
+			JOIN categories c ON c.id = m.category_id
+			WHERE g.id = c.group_id
+		`, [maniId]);
+		if(err) {
+			console.log("Error: %s", err);
+			continue;
+		}
+		const hier = res.rows[0];
+		*/
+
+		if(sourceEvents.length) {
+			sourceEvents.forEach(row => {
+				updates.push({
+					type: "event",
+					state: entityStatus.CREATED,
+					data: {
+						state: '?', /* XXX */
+						id: row.id,
+						startTime: row.start_time,
+						groupName: hier.groupname,
+						categoryName: hier.categoryname,
+						manifestationName: hier.manifestationname,
+						homeTeam: "",
+						awayTeam: ""
+					}
+
+				});
 			});
-		});
+		}
 	}
 	client.release();
 	handleUpdates(updates);
@@ -838,8 +864,8 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 	[res, err] = await client.exec(`
 		SELECT name,participant_id,external_id
 		FROM source_participants
-		WHERE source = $1 AND participant_id = ANY($2)
-	`, [ctx.source, participants.map(x => x.id)]);
+		WHERE source = $1 AND external_id = ANY($2)
+	`, [ctx.source, extEvents.map(x => [x.homeTeamId, x.awayTeamId]).flat()]);
 	if(err) {
 		console.log("Error: %s", err);
 		client.release();
@@ -891,12 +917,31 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 			}
 			eventId = res.rows[0].id;
 
+			[res, err] = await client.exec(`
+				select g.name as groupname,c.name as categoryname,m.name as manifestationname
+				from groups g
+				join manifestations m on m.id = $1
+				join categories c on c.id = m.category_id
+				where g.id = c.group_id
+			`, [maniId]);
+			if(err) {
+				console.log("Error: %s", err);
+				continue;
+			}
+			const hier = res.rows[0];
+
 			updates.push({
 				type: "event",
 				state: entityStatus.CREATED,
 				data: {
+					state: '?', /* XXX */
 					id: eventId,
-					startTime: extEvent.date
+					startTime: extEvent.date,
+					groupName: hier.groupname,
+					categoryName: hier.categoryname,
+					manifestationName: hier.manifestationname,
+					homeTeam: home.name,
+					awayTeam: away.name,
 				}
 			});
 
@@ -923,25 +968,25 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 
 		let sourceParticipant;
 
-		sourceParticipant = sourceParticipants.find(x => x.participant_id == home.id);
+		sourceParticipant = sourceParticipants.find(x => x.external_id == extEvent.homeTeamId);
 		if(!sourceParticipant) {
 			newSourceParticipants.push({
 				source: ctx.source,
 				participant_id: home.id,
 				name: home.name,
-				external_id: extEvent.homeTeamId /* Note: may be 0 (e.g. for unibet) */
+				external_id: extEvent.homeTeamId
 			});
 		} else {
 			/* TODO: update participant (name...?) */
 		}
 
-		sourceParticipant = sourceParticipants.find(x => x.participant_id == away.id);
+		sourceParticipant = sourceParticipants.find(x => x.external_id == extEvent.awayTeamId);
 		if(!sourceParticipant) {
 			newSourceParticipants.push({
 				source: ctx.source,
 				participant_id: away.id,
 				name: away.name,
-				external_id: extEvent.awayTeamId /* Note: may be 0 (e.g. for unibet) */
+				external_id: extEvent.awayTeamId
 			});
 		} else {
 			/* TODO: update participant (name...?) */
