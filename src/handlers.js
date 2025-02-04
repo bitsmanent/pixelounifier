@@ -135,7 +135,7 @@ export async function handleGroups(groups, ctx) {
 	const client = await getClient();
 	const groupIds = groups.map(x => x.id);
 	const updates = [];
-	let res, err, cur;
+	let res, err;
 
 	[res, err] = await client.exec(`
 		SELECT group_id,external_id,name
@@ -157,8 +157,6 @@ export async function handleGroups(groups, ctx) {
 		let groupId = sourceGroup?.group_id;
 
 		if(!sourceGroup) {
-			let row;
-
 			[res, err] = await client.exec(`
 				SELECT id
 				FROM groups
@@ -168,7 +166,7 @@ export async function handleGroups(groups, ctx) {
 				console.log("Error: %s", err);
 				continue;
 			}
-			row = res.rows[0] || {};
+			const row = res.rows[0] || {};
 
 			groupId = row.id;
 			if(!groupId) {
