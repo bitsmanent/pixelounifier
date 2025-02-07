@@ -285,8 +285,6 @@ export async function handleCates({groupId: extGroupId,cates}, ctx) {
 		let cateId = sourceCate?.category_id;
 
 		if(!sourceCate) {
-			let row, gid;
-
 			[res, err] = await client.exec(`
 				SELECT id
 				FROM categories
@@ -513,28 +511,43 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 			console.log("Error: %s", err);
 			continue;
 		}
-		const sourceEvents = res.rows;
+		const events = res.rows;
 
-		if(sourceEvents.length) {
-			const [hier, hierErr] = await getHierFromMani(maniId);
-			if(hierErr) {
-				console.log("Error: %s", hierErr);
+		if(events.length) {
+			[res, err] = await getHierFromMani(maniId);
+			if(err) {
+				console.log("Error: %s", err);
 				continue;
 			}
 
-			sourceEvents.forEach(row => {
+			const hier = res;
+
+			[res, err] = await client.exec(`
+			SELECT p.name,ep.event_id as event_id,sp.team_name
+			FROM event_participants ep
+			JOIN source_participants sp ON sp.participant_id = ep.participant_id
+			JOIN participants p ON p.id = ep.participant_id
+			WHERE ep.event_id = ANY($1)
+			`, [events.map(x => x.id)]);
+			if(err) {
+				console.log("Error: %s", err);
+				continue;
+			}
+			const eventParticipants = res.rows;
+
+			events.forEach(ev => {
 				updates.push({
 					type: "event",
 					state: entityStatus.CREATED,
 					data: {
 						state: '?', /* XXX */
-						id: row.id,
-						startTime: row.start_time,
+						id: ev.id,
+						startTime: ev.start_time,
 						groupName: hier.groupname,
 						categoryName: hier.categoryname,
 						manifestationName: hier.manifestationname,
-						homeTeam: "",
-						awayTeam: ""
+						homeTeam: eventParticipants.find(x => x.event_id == ev.id && x.team_name == "home"),
+						awayTeam: eventParticipants.find(x => x.event_id == ev.id && x.team_name == "away"),
 					}
 
 				});
@@ -693,7 +706,7 @@ export async function handleGames(extOutcomes, ctx) {
 	});
 
 	[res, err] = await client.exec(`
-		SELECT id,event_id,market_id,outcome_id,value
+		SELECT id,market_id,outcome_id,value,external_event_id
 		FROM source_outcomes
 		WHERE source = $1 AND external_id = ANY($2)
 	`, [ctx.source, extOutcomeIds]);
@@ -762,7 +775,7 @@ export async function handleGames(extOutcomes, ctx) {
 		const sourceMarket = sourceMarkets.find(x => x.external_id == extOutcome.marketId);
 		const sourceEvent = sourceEvents.find(x => x.external_id == extOutcome.eventId);
 		const sourceOutcome = sourceOutcomes.find(x =>
-			x.event_id == sourceEvent.event_id
+			x.external_event_id == extOutcome.eventId
 			&& x.market_id == sourceMarket.market_id
 			&& x.outcome_id == outcome.id);
 
@@ -984,6 +997,7 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 				source: ctx.source,
 				participant_id: home.id,
 				name: home.name,
+				team_name: "home",
 				external_id: extEvent.homeTeamId
 			});
 		} else {
@@ -996,6 +1010,7 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 				source: ctx.source,
 				participant_id: away.id,
 				name: away.name,
+				team_name: "away",
 				external_id: extEvent.awayTeamId
 			});
 		} else {
@@ -1004,23 +1019,8 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 	}
 
 	if(newSourceParticipants.length) {
-		/*
-		const uniqNSP = newSourceParticipants.reduce((acc,p) => {
-			if(!acc.found[p.participant_id]) {
-				acc.found[p.participant_id] = 1;
-				acc.uniq.push(p);
-			}
-			return acc;
-
-		}, {uniq:[],found:{}}).uniq;
-
-		// TODO: ensure this actually happens
-		if(uniqNSP.length != newSourceParticipants.length)
-			debugger;
-		*/
-
 		[res, err] = await insertMany("source_participants",
-			["source", "participant_id", "name", "external_id"],
+			["source", "participant_id", "name", "team_name", "external_id"],
 			newSourceParticipants, null);
 		if(err)
 			console.log("Error: %s", err);

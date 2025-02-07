@@ -73,8 +73,8 @@ async function handleMessage(type, source, data) {
 }
 
 async function enqueueMessage(type, source, data, resolve) {
-	//const keyLock = "sequential";
-	const keyLock = type;
+	const keyLock = "sequential";
+	//const keyLock = type;
 
 	if(queueLocks[keyLock]) {
 		if(!waitingQueue[keyLock])
@@ -98,7 +98,9 @@ async function enqueueMessage(type, source, data, resolve) {
 		return resolve(null);
 	}
 
+	console.log("START %s.%s", ctx.source, type);
 	const r = await handler(data, ctx);
+	console.log("FINISH %s.%s", ctx.source, type);
 
 	resolve(r);
 	delete queueLocks[keyLock];
