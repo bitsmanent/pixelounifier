@@ -382,6 +382,24 @@ export async function handleCates({groupId: extGroupId,cates}, ctx) {
 	handleUpdates(updates);
 }
 
+async function getHierFromMani(maniId) {
+	const client = await getClient();
+	const [res, err] = await client.exec(`
+		SELECT g.name AS groupname,c.name AS categoryname,m.name AS manifestationname
+		FROM groups g
+		JOIN manifestations m ON m.id = $1
+		JOIN categories c ON c.id = m.category_id
+		WHERE g.id = c.group_id
+	`, [maniId]);
+	if(err)
+		return ["", err];
+	if(!res.rows.length)
+		return ["", `No hier available for mani ${maniId}`];
+	const hier = res.rows[0];
+	client.release();
+	return [hier];
+}
+
 export async function handleManis({cateId: extCateId,manis}, ctx) {
 	const client = await getClient();
 	const maniIds = manis.map(x => x.id);
@@ -497,22 +515,13 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 		}
 		const sourceEvents = res.rows;
 
-		/*
-		[res, err] = await client.exec(`
-			SELECT g.name AS groupname,c.name AS categoryname,m.name AS manifestationname
-			FROM groups g
-			JOIN manifestations m ON m.id = $1
-			JOIN categories c ON c.id = m.category_id
-			WHERE g.id = c.group_id
-		`, [maniId]);
-		if(err) {
-			console.log("Error: %s", err);
-			continue;
-		}
-		const hier = res.rows[0];
-		*/
-
 		if(sourceEvents.length) {
+			const [hier, hierErr] = await getHierFromMani(maniId);
+			if(hierErr) {
+				console.log("Error: %s", hierErr);
+				continue;
+			}
+
 			sourceEvents.forEach(row => {
 				updates.push({
 					type: "event",
@@ -884,8 +893,10 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 			SELECT e.id
 			FROM events e
 			JOIN source_events se ON se.event_id = e.id
-			WHERE se.source = $1 AND se.external_id = $2
-		`, [ctx.source, extEvent.id]);
+			WHERE se.source = $1
+			AND se.external_id = $2
+			AND se.external_manifestation_id = $3
+		`, [ctx.source, extEvent.id, extManiId]);
 		if(err) {
 			console.log("Error: %s", err);
 			continue;
@@ -918,34 +929,6 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 			eventId = res.rows[0].id;
 
 			[res, err] = await client.exec(`
-				select g.name as groupname,c.name as categoryname,m.name as manifestationname
-				from groups g
-				join manifestations m on m.id = $1
-				join categories c on c.id = m.category_id
-				where g.id = c.group_id
-			`, [maniId]);
-			if(err) {
-				console.log("Error: %s", err);
-				continue;
-			}
-			const hier = res.rows[0];
-
-			updates.push({
-				type: "event",
-				state: entityStatus.CREATED,
-				data: {
-					state: '?', /* XXX */
-					id: eventId,
-					startTime: extEvent.date,
-					groupName: hier.groupname,
-					categoryName: hier.categoryname,
-					manifestationName: hier.manifestationname,
-					homeTeam: home.name,
-					awayTeam: away.name,
-				}
-			});
-
-			[res, err] = await client.exec(`
 				INSERT INTO event_participants (event_id, participant_id)
 				VALUES ($1, $2), ($1, $3)
 			`, [eventId, home.id, away.id]);
@@ -962,6 +945,33 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 				console.log("Error: %s", err);
 				continue;
 			}
+
+			/* if fails then we got event before the mani which is
+			 * an out-of-order flow handled elsewhere like in
+			 * handleManis() */
+			if(maniId) {
+				const [hier, hierErr] = await getHierFromMani(maniId);
+				if(hierErr) {
+					console.log("Error: %s", hierErr);
+					continue;
+				}
+
+				updates.push({
+					type: "event",
+					state: entityStatus.CREATED,
+					data: {
+						state: '?', /* XXX */
+						id: eventId,
+						startTime: extEvent.date,
+						groupName: hier.groupname,
+						categoryName: hier.categoryname,
+						manifestationName: hier.manifestationname,
+						homeTeam: home.name,
+						awayTeam: away.name,
+					}
+				});
+			}
+
 		} else {
 			/* TODO: Update event (start_time, etc.) or participants if needed... */
 		}
