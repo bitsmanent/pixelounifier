@@ -540,7 +540,7 @@ export async function handleManis({cateId: extCateId,manis}, ctx) {
 					type: "event",
 					state: entityStatus.CREATED,
 					data: {
-						state: '?', /* XXX */
+						state: matchStatus.ACTIVE,
 						id: ev.id,
 						startTime: ev.start_time,
 						groupName: hier.groupname,
@@ -973,7 +973,7 @@ export async function handleEvents({maniId:extManiId,events:extEvents}, ctx) {
 					type: "event",
 					state: entityStatus.CREATED,
 					data: {
-						state: '?', /* XXX */
+						state: matchStatus.ACTIVE,
 						id: eventId,
 						startTime: extEvent.date,
 						groupName: hier.groupname,
