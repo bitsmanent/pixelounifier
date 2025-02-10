@@ -17,7 +17,7 @@ export const entityStatus = {
 	REMOVED: 3
 };
 
-const matchStatus = {
+export const matchStatus = {
 	ACTIVE: 1,
 	DISABLED: 2
 };

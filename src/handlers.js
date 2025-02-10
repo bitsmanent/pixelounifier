@@ -9,7 +9,7 @@
  */
 
 import {getClient,insertMany,updateMany} from "./db.js";
-import {entityStatus,outcomeStatus,sendUpdates} from "./lib.js";
+import {entityStatus,matchStatus,outcomeStatus,sendUpdates} from "./lib.js";
 
 async function handleUpdates(updates) {
 	if(!updates.length)
@@ -64,7 +64,7 @@ async function processEventOutcomes(eventOutcomes) {
 			&& a.outcome_id == b.outcome_id;
 		const eventSourceOutcomes = sourceOutcomes.filter(x => fltr(x, eventOutcome));
 		const avg = Math.round(eventSourceOutcomes.reduce((acc, item) => acc + item.value, 0) / (eventSourceOutcomes.length || 1));
-		const outcomeState = outcomeStatus.ACTIVE;
+		const outcomeState = outcomeStatus.ACTIVE; /* XXX .state? */
 
 		if(avg == eventOutcome.ecvalue)
 			return;
