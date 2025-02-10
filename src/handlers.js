@@ -33,8 +33,8 @@ async function processEventOutcomes(eventOutcomes) {
 	const updates = [];
 	let res, err;
 
-	const tuples = eventOutcomes.map(x => [x.event_id, x.market_id, x.outcome_id]);
-	const values = tuples.map((_, i) => `($${i * 3 + 1}::integer, $${i * 3 + 2}::integer, $${i * 3 + 3}::integer)`).join(',');
+	let tuples = eventOutcomes.map(x => [x.event_id, x.market_id, x.outcome_id]);
+	let values = tuples.map((_, i) => `($${i * 3 + 1}::integer, $${i * 3 + 2}::integer, $${i * 3 + 3}::integer)`).join(',');
 
 	/* Note: we must JOIN here to get the outcome name. This can be avoid
 	 * by sending names each time we get a new outcome. Also for markets. */
@@ -56,13 +56,14 @@ async function processEventOutcomes(eventOutcomes) {
 	}
 	const sourceOutcomes = res.rows;
 	const updEventOutcomes = [];
+	const fltrEventOutcome = (a,b) =>
+		a.event_id == b.event_id
+		&& a.market_id == b.market_id
+		&& a.outcome_id == b.outcome_id;
+
 
 	eventOutcomes.forEach(eventOutcome => {
-		const fltr = (a,b) =>
-			a.event_id == b.event_id
-			&& a.market_id == b.market_id
-			&& a.outcome_id == b.outcome_id;
-		const eventSourceOutcomes = sourceOutcomes.filter(x => fltr(x, eventOutcome));
+		const eventSourceOutcomes = sourceOutcomes.filter(x => fltrEventOutcome(x, eventOutcome));
 		const avg = Math.round(eventSourceOutcomes.reduce((acc, item) => acc + item.value, 0) / (eventSourceOutcomes.length || 1));
 		const outcomeState = outcomeStatus.ACTIVE; /* XXX .state? */
 
@@ -93,6 +94,49 @@ async function processEventOutcomes(eventOutcomes) {
 		[res, err] = await updateMany("event_outcomes", ["value::integer"], updEventOutcomes, ["event_id", "market_id", "outcome_id"]);
 		if(err)
 			console.log("Error: %s", err);
+	}
+
+	/* undelivered outcomes are flagged as removed */
+	[res, err] = await client.exec(`
+		SELECT event_id,market_id,outcome_id
+		FROM event_outcomes
+		WHERE event_id = ANY($1)
+	`, [eventOutcomes.map(x => x.event_id)]);
+	if(err)
+		console.log("Error: %s", err);
+	const allEventOutcomes = res.rows;
+
+	if(allEventOutcomes.length) {
+		const removed = [];
+		allEventOutcomes.forEach(eo => {
+			const exists = eventOutcomes.some(x => fltrEventOutcome(x, eo));
+
+			if(exists)
+				return;
+			removed.push(eo);
+			updates.push({
+				type: "game",
+				state: entityStatus.UPDATED,
+				data: {
+					state: outcomeStatus.REMOVED,
+					event_id: eo.event_id,
+					market_id: eo.market_id,
+					outcome_id: eo.outcome_id
+				}
+			});
+		});
+
+		if(removed.length) {
+			tuples = removed.map(x => [x.event_id, x.market_id, x.outcome_id]);
+			values = tuples.map((_, i) => `($${i * 3 + 1}::integer, $${i * 3 + 2}::integer, $${i * 3 + 3}::integer)`).join(',');
+
+			[res, err] = await client.exec(`
+				DELETE FROM event_outcomes
+				WHERE (event_id, market_id, outcome_id) = ANY(ARRAY[${values}])
+			`, tuples.flat());
+			if(err)
+				console.log("Error: %s", err);
+		}
 	}
 
 	client.release();
