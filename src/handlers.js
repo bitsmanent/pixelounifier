@@ -39,14 +39,14 @@ async function processEventOutcomes(eventOutcomes) {
 	/* Note: we must JOIN here to get the outcome name. This can be avoid
 	 * by sending names each time we get a new outcome. Also for markets. */
 	[res, err] = await client.exec(`
-		SELECT so.event_id,so.market_id,so.outcome_id,so.value
-		,oc.name as name,ec.value as ecvalue
+		SELECT so.event_id,so.market_id,so.outcome_id,so.state,so.value
+		,oc.name as name,eo.state as eostate,eo.value as eovalue
 		FROM source_outcomes so
 		JOIN outcomes oc ON oc.id = so.outcome_id
-		JOIN event_outcomes ec
-			ON ec.event_id = so.event_id
-			AND ec.market_id = so.market_id
-			AND ec.outcome_id = so.outcome_id
+		JOIN event_outcomes eo
+			ON eo.event_id = so.event_id
+			AND eo.market_id = so.market_id
+			AND eo.outcome_id = so.outcome_id
 		WHERE (so.event_id, so.market_id, so.outcome_id) = ANY(ARRAY[${values}])
 	`, tuples.flat());
 	if(err) {
@@ -55,43 +55,59 @@ async function processEventOutcomes(eventOutcomes) {
 		return;
 	}
 	const sourceOutcomes = res.rows;
+
 	const updEventOutcomes = [];
 	const fltrEventOutcome = (a,b) =>
 		a.event_id == b.event_id
 		&& a.market_id == b.market_id
 		&& a.outcome_id == b.outcome_id;
 
-
 	eventOutcomes.forEach(eventOutcome => {
 		const eventSourceOutcomes = sourceOutcomes.filter(x => fltrEventOutcome(x, eventOutcome));
-		const avg = Math.round(eventSourceOutcomes.reduce((acc, item) => acc + item.value, 0) / (eventSourceOutcomes.length || 1));
-		const outcomeState = outcomeStatus.ACTIVE; /* XXX .state? */
 
-		if(avg == eventOutcome.ecvalue)
+		if(!eventSourceOutcomes.length) {
+			console.warn("no eventSourceOutcomes found, what's wrong?");
+			debugger;
+		}
+
+		/* Takes state/value from any records since they're always the
+		 * same: event_outcomes is unique for all sources. The name of
+		 * the outcome instead may differ so let's take that from the
+		 * first available source. */
+		const outcomeName = eventSourceOutcomes[0].name;
+		const outcomeState = eventSourceOutcomes[0].eostate;
+		const outcomeValue = eventSourceOutcomes[0].eovalue;
+
+		const eoavg = Math.round(eventSourceOutcomes.reduce((acc, item) => acc + item.value, 0) / (eventSourceOutcomes.length || 1));
+		const eostate = eventSourceOutcomes.every(x => x.state == outcomeStatus.ACTIVE) ? outcomeStatus.ACTIVE : outcomeStatus.DISABLED;
+
+		if(eostate == outcomeState && eoavg == outcomeValue)
 			return;
 
 		updates.push({
 			type: "game",
 			state: eventOutcome.state,
 			data: {
-				state: outcomeState,
+				state: eostate,
 				event_id: eventOutcome.event_id,
 				market_id: eventOutcome.market_id,
 				outcome_id: eventOutcome.outcome_id,
-				name: eventSourceOutcomes[0].name,
-				value: avg
+				name: outcomeName,
+				value: eoavg
 			}
 		});
 		updEventOutcomes.push({
 			event_id: eventOutcome.event_id,
 			market_id: eventOutcome.market_id,
 			outcome_id: eventOutcome.outcome_id,
-			value: avg
+			value: eoavg,
+			state: eostate
 		});
 	});
 
 	if(updEventOutcomes.length) {
-		[res, err] = await updateMany("event_outcomes", ["value::integer"], updEventOutcomes, ["event_id", "market_id", "outcome_id"]);
+		[res, err] = await updateMany("event_outcomes", ["value::integer", "state::integer"],
+			updEventOutcomes, ["event_id", "market_id", "outcome_id"]);
 		if(err)
 			console.log("Error: %s", err);
 	}
@@ -129,9 +145,9 @@ async function processEventOutcomes(eventOutcomes) {
 		if(removed.length) {
 			tuples = removed.map(x => [x.event_id, x.market_id, x.outcome_id]);
 			values = tuples.map((_, i) => `($${i * 3 + 1}::integer, $${i * 3 + 2}::integer, $${i * 3 + 3}::integer)`).join(',');
-
 			[res, err] = await client.exec(`
-				DELETE FROM event_outcomes
+				UPDATE event_outcomes
+				SET state = ${outcomeStatus.REMOVED}
 				WHERE (event_id, market_id, outcome_id) = ANY(ARRAY[${values}])
 			`, tuples.flat());
 			if(err)
@@ -720,12 +736,14 @@ async function finalizeSourceOutcomes(source, column) {
 			event_id: sourceOutcome.event_id,
 			market_id: sourceOutcome.market_id,
 			outcome_id: sourceOutcome.outcome_id,
+			/* computed in processEventOutcomes() () */
+			state: 0,
 			value: 0
 		});
 	}
 	if(newEventOutcomes.length) {
 		[res, err] = await insertMany("event_outcomes",
-			["event_id", "market_id", "outcome_id", "value"],
+			["event_id", "market_id", "outcome_id", "state", "value"],
 			newEventOutcomes, null);
 		if(err)
 			console.log("Error: %s", err);
@@ -829,12 +847,11 @@ export async function handleGames(extOutcomes, ctx) {
 				&& x.external_event_id == extOutcome.eventId);
 
 			if(!alreadyInserting) {
-				if(isNaN(parseInt(extOutcome.odd)))
-					debugger;
 				newSourceOutcomes.push({
 					source: ctx.source,
 					name: extOutcome.outcomeName,
 					value: extOutcome.odd,
+					state: extOutcome.enabled ? outcomeStatus.ACTIVE : outcomeStatus.DISABLED,
 					outcome_id: outcome.id,
 					market_id: sourceMarket ? sourceMarket.market_id : null,
 					event_id: sourceEvent ? sourceEvent.event_id : null,
@@ -848,7 +865,8 @@ export async function handleGames(extOutcomes, ctx) {
 			if(sourceOutcome.value != extOutcome.odd) {
 				updSourceOutcomes.push({
 					id: sourceOutcome.id,
-					value: extOutcome.odd
+					value: extOutcome.odd,
+					state: extOutcome.enabled ? outcomeStatus.ACTIVE : outcomeStatus.DISABLED
 				});
 			}
 		}
@@ -872,7 +890,9 @@ export async function handleGames(extOutcomes, ctx) {
 					event_id: sourceEvent.event_id,
 					market_id: sourceMarket.market_id,
 					outcome_id: outcome.id,
-					value: 0 /* computed in processEventOutcomes() */
+					/* computed in processEventOutcomes() () */
+					state: 0,
+					value: 0
 				});
 			} else if(sourceOutcome) {
 				if(sourceOutcome.value != extOutcome.odd) {
@@ -889,7 +909,7 @@ export async function handleGames(extOutcomes, ctx) {
 
 	if(newSourceOutcomes.length) {
 		[res, err] = await insertMany("source_outcomes", [
-			"source", "name", "value",
+			"source", "name", "value", "state",
 			"outcome_id", "market_id", "event_id",
 			"external_id", "external_market_id", "external_event_id"
 		], newSourceOutcomes);
@@ -898,7 +918,9 @@ export async function handleGames(extOutcomes, ctx) {
 	}
 
 	if(updSourceOutcomes.length) {
-		[res, err] = await updateMany("source_outcomes", ["value::integer"], updSourceOutcomes, "id");
+		[res, err] = await updateMany("source_outcomes",
+			["value::integer", "state::integer"],
+			updSourceOutcomes, "id");
 		if(err)
 			console.log("Error: %s", err);
 
@@ -906,7 +928,7 @@ export async function handleGames(extOutcomes, ctx) {
 
 	if(newEventOutcomes.length) {
 		[res, err] = await insertMany("event_outcomes", [
-			"event_id", "market_id", "outcome_id", "value"],
+			"event_id", "market_id", "outcome_id", "state", "value"],
 			newEventOutcomes, null);
 		if(err)
 			console.log("Error: %s", err);

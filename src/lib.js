@@ -6,7 +6,7 @@ export const entityTypes = {
 	CATE: 2,
 	MANI: 3,
 	EVENT: 4,
-	PARTECIPANT: 5,
+	PARTICIPANT: 5,
 	MARKET: 6,
 	OUTCOME: 7
 };
