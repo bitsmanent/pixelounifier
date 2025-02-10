@@ -866,7 +866,6 @@ export async function handleGames(extOutcomes, ctx) {
 			newEventOutcomes, null);
 		if(err)
 			console.log("Error: %s", err);
-		processEventOutcomes(newEventOutcomes.map(x => ({...x,state:entityStatus.CREATED})));
 		eventToProcess = [...eventToProcess, ...newEventOutcomes.map(x => ({...x,state:entityStatus.CREATED}))];
 	}
 
