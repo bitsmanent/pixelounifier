@@ -55,6 +55,7 @@ function buildInsertMany(table, fields, items, primaryKey = "id") {
 		csvReturn = [primaryKey, csvFields].join(',');
 		returning = `RETURNING ${csvReturn}`;
 	}
+	/* XXX sqlValues.join(',')? */
 	const sql = `
 		INSERT INTO ${table} (${csvFields})
 		VALUES ${sqlValues}

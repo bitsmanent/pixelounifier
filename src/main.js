@@ -21,9 +21,6 @@ const messageHandlers  = {
 	games: handleGames
 };
 
-const queueLocks = {};
-const waitingQueue = {};
-
 async function onMessage(handler) {
 	const rmqConfig = {
 		host: "rabbittest.pixelo.it",
@@ -50,12 +47,12 @@ async function onMessage(handler) {
 
 		chan.ack(msg);
 		if(processed[txt]) {
-			console.log("Skip message of type %s from %s...", content.type, content.source);
+			//console.log("Skip duplicate message of type %s from %s...", content.type, content.source);
 			if(processed.tm)
 				clearTimeout(processed.tm);
 			processed.tm = setTimeout(() => {
 				processed.tm = 0;
-				console.log("Clearing duplicate cache after 200ms...");
+				//console.log("Clearing duplicate cache after 200ms...");
 			}, 200);
 			return;
 		}
@@ -67,56 +64,10 @@ async function onMessage(handler) {
 }
 
 async function handleMessage(type, source, data) {
-	return new Promise(resolve => {
-		enqueueMessage(type, source, data, resolve);
-	});
-}
-
-async function enqueueMessage(type, source, data, resolve) {
-	const keyLock = "sequential";
-	//const keyLock = type;
-
-	if(queueLocks[keyLock]) {
-		if(!waitingQueue[keyLock])
-			waitingQueue[keyLock] = [];
-		waitingQueue[keyLock].push({type,source,data,resolve});
-		console.log("Queued message of type %s from %s (%s/%s)...",
-			type,
-			source,
-			waitingQueue[keyLock].length,
-			Object.values(waitingQueue).reduce((sum,q) => sum += q.length, 0)
-		);
-		return;
-	}
-	queueLocks[keyLock] = 1;
-
 	const handler = messageHandlers[type];
 	const ctx = {type,source};
 
-	if(!handler) {
-		delete queueLocks[keyLock];
-		return resolve(null);
-	}
-
-	console.log("START %s.%s", ctx.source, type);
-	const r = await handler(data, ctx);
-	console.log("FINISH %s.%s", ctx.source, type);
-
-	resolve(r);
-	delete queueLocks[keyLock];
-
-	const queued = waitingQueue[keyLock]?.shift();
-
-	if(queued) {
-		console.log("Dequeued a message of type %s from %s (%s/%s)...",
-			queued.type,
-			queued.source,
-			waitingQueue[keyLock].length,
-			Object.values(waitingQueue).reduce((sum,q) => sum += q.length, 0)
-		);
-
-		await enqueueMessage(queued.type, queued.source, queued.data, queued.resolve);
-	}
+	await handler(data, ctx);
 }
 
 async function main() {
@@ -124,7 +75,7 @@ async function main() {
 	onMessage(async ({type,source,data}) => {
 		if(type == "error")
 			return console.error("onMessage() error", data);
-		console.log("Handle message of type %s from %s", type, source);
+		//console.log("Handle message of type %s from %s", type, source);
 		await handleMessage(type, source, data);
 	});
 }
