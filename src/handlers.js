@@ -1,7 +1,6 @@
 import {getClient} from "./db.js";
 import {outcomeStatus} from "./lib.js";
 
-/* XXX move into db.js */
 async function upsert(table, items, insertFields, conflictFields, updateFields) {
 	const client = await getClient();
 	const csvFields = insertFields.join(',');
@@ -20,12 +19,17 @@ async function upsert(table, items, insertFields, conflictFields, updateFields) 
 	});
 
 	const conflictSet = updateFields.map(x => `${x} = EXCLUDED.${x}`).join(',');
+	const updChecks = updateFields.map(x => `${table}.${x} IS DISTINCT FROM EXCLUDED.${x}`).join(" OR ");
 
 	const sql = `
 	INSERT INTO ${table} (${csvFields})
 	VALUES ${sqlValues.join(',')}
 	ON CONFLICT (${conflictFields.join(',')}) DO UPDATE
-	SET ${conflictSet}
+	SET ${conflictSet},updated = CASE
+		WHEN ${updChecks} THEN TRUE
+		ELSE ${table}.updated
+	END
+	WHERE ${updChecks}
 	`;
 
 	const [res, err] = await client.exec(sql, values);
