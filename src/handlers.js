@@ -47,6 +47,8 @@ async function upsert(table, items, insertFields, conflictFields, changeFields) 
 }
 
 export async function handleGroups(extGroups, ctx) {
+	if(!extGroups.length)
+		return console.warn("handleGroups() called with empty set.");
 	const items = extGroups.map(x => ({
 		source: ctx.source,
 		name: x.name,
@@ -57,6 +59,8 @@ export async function handleGroups(extGroups, ctx) {
 }
 
 export async function handleCates({groupId: extGroupId,cates: extCates}, ctx) {
+	if(!extCates.length)
+		return console.warn("handleCates() called with empty set.");
 	const items = extCates.map(x => ({
 		source: ctx.source,
 		name: x.name,
@@ -69,6 +73,8 @@ export async function handleCates({groupId: extGroupId,cates: extCates}, ctx) {
 }
 
 export async function handleManis(ext, ctx) {
+	if(!ext.manis.length)
+		return console.warn("handleManis() called with empty set.");
 	const items = ext.manis.map(x => ({
 		source: ctx.source,
 		name: x.name,
@@ -82,6 +88,8 @@ export async function handleManis(ext, ctx) {
 }
 
 export async function handleClasses(ext, ctx) {
+	if(!ext.classes.length)
+		return console.warn("handleClasses() called with empty set.");
 	const items = ext.classes.map(x => ({
 		source: ctx.source,
 		name: x.name,
