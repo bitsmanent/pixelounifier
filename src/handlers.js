@@ -104,10 +104,10 @@ export async function handleClasses(ext, ctx) {
 export async function handleEvents(ext, ctx) {
 	if(!ext.events.length)
 		return console.warn("handleEvents() called with empty set.");
-	/* XXX start date */
 	const items = ext.events.map(x => ({
 		source: ctx.source,
 		name: x.name,
+		date: x.date,
 		external_id: x.id,
 		external_manifestation_id: ext.maniId
 	}));
@@ -127,9 +127,8 @@ export async function handleEvents(ext, ctx) {
 		external_event_id: x.id
 	}));
 
-	/* XXX start date */
-	await upsert("source_events", items, ["source", "name", "external_id", "external_manifestation_id"],
-		["source", "external_id", "external_manifestation_id"], ["name"]);
+	await upsert("source_events", items, ["source", "name", "date", "external_id", "external_manifestation_id"],
+		["source", "external_id", "external_manifestation_id"], ["name", "date"]);
 	await upsert("source_participants", [...homeTeams, ...awayTeams],
 		["source", "team_name", "name", "external_id", "external_event_id"],
 		["source", "external_id", "external_event_id"], ["name"]);
