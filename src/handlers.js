@@ -1,11 +1,12 @@
 import {getClient} from "./db.js";
 import {outcomeStatus} from "./lib.js";
 
-async function upsert(table, items, insertFields, conflictFields, updateFields) {
+async function upsert(table, items, insertFields, conflictFields, changeFields) {
 	const client = await getClient();
 	const csvFields = insertFields.join(',');
 	const sqlValues = [];
 	const values = [];
+	const updatedAtValSql = "(NOW() at time zone 'utc')";
 	let valIndex = 0;
 
 	items.forEach(item => {
@@ -15,22 +16,28 @@ async function upsert(table, items, insertFields, conflictFields, updateFields) 
 			curValues.push(`$${++valIndex}`);
 			values.push(item[fld]);
 		});
+		curValues.push(updatedAtValSql);
+
 		sqlValues.push(`(${curValues.join(',')})`);
 	});
 
-	const conflictSet = updateFields.map(x => `${x} = EXCLUDED.${x}`).join(',');
-	const updChecks = updateFields.map(x => `${table}.${x} IS DISTINCT FROM EXCLUDED.${x}`).join(" OR ");
+	const conflictSet = changeFields.map(x => `${x} = EXCLUDED.${x}`).join(',');
+	const updChecks = changeFields.map(x => `${table}.${x} IS DISTINCT FROM EXCLUDED.${x}`).join(" OR ");
 
 	const sql = `
-	INSERT INTO ${table} (${csvFields})
+	INSERT INTO ${table} (${csvFields},updated_at)
 	VALUES ${sqlValues.join(',')}
 	ON CONFLICT (${conflictFields.join(',')}) DO UPDATE
-	SET ${conflictSet},updated = CASE
+	SET ${conflictSet}
+	,updated_at = ${updatedAtValSql}
+	,changed = CASE
 		WHEN ${updChecks} THEN TRUE
-		ELSE ${table}.updated
+		ELSE ${table}.changed
 	END
-	WHERE ${updChecks}
+	-- WHERE ${updChecks}
 	`;
+
+	//console.log(sql);
 
 	const [res, err] = await client.exec(sql, values);
 	if(err)

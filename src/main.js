@@ -71,6 +71,7 @@ async function handleMessage(type, source, data) {
 }
 
 async function main() {
+	console.log("Running at %s...", new Date());
 	process.on("uncaughtException", console.error);
 	onMessage(async ({type,source,data}) => {
 		if(type == "error")
