@@ -48,6 +48,23 @@ export function getISO8601(date = new Date()) {
 
 const rmqUpdates = {}; /* used to keep conn/chan opened. To be cleaned up! */
 
+export function cleanString(s) {
+	return s.replace(/[^a-zA-Z0-9_.]/g, '').toLowerCase();
+}
+
+export function groupBy(items, getKey, getVal) {
+	const ret = {};
+
+	for(const item of items) {
+		const key = getKey(item);
+
+		if(!ret[key])
+			ret[key] = [];
+		ret[key].push(getVal ? getVal(item) : item);
+	}
+	return ret;
+}
+
 export async function sendUpdates(type, data) {
 	const rmqConfig = {
 		host: "rabbittest.pixelo.it",

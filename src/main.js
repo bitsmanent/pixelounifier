@@ -70,9 +70,11 @@ async function handleMessage(type, source, data) {
 	await handler(data, ctx);
 }
 
+import {processDataSources} from "./unifier.js";
 async function main() {
 	console.log("Running at %s...", new Date());
 	process.on("uncaughtException", console.error);
+	return await processDataSources();
 	onMessage(async ({type,source,data}) => {
 		if(type == "error")
 			return console.error("onMessage() error", data);
