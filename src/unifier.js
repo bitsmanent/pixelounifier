@@ -15,7 +15,6 @@ async function getSourceGroups() {
 		client.release();
 		return [];
 	}
-
 	client.release();
 	return res.rows;
 }
@@ -69,7 +68,6 @@ async function getSourceCategories() {
 		client.release();
 		return [];
 	}
-
 	client.release();
 	return res.rows;
 }
@@ -104,7 +102,6 @@ async function handleSourceCategories(sourceCategories) {
 			continue;
 		}
 	}
-
 	client.release();
 }
 
@@ -119,21 +116,12 @@ async function getSourceManifestations() {
 	AND sc.external_id = sm.external_category_id
 	RETURNING sm.id,sm.source,sm.name,sc.category_id
 	`);
-	/*
-	const [res, err] = await client.exec(`
-	SELECT sm.id,sm.source,sm.name,sc.category_id
-	FROM source_manifestations sm
-	JOIN source_categories sc ON sc.external_id = sm.external_category_id
-	WHERE sm.changed = TRUE AND sm.manifestation_id IS NULL AND sc.category_id IS NOT NULL
-	`)
-	*/
 
 	if(err) {
 		console.log("Manifestations error: %s", err);
 		client.release();
 		return [];
 	}
-
 	client.release();
 	return res.rows;
 }
@@ -168,7 +156,6 @@ async function handleSourceManifestations(sourceManifestations) {
 			continue;
 		}
 	}
-
 	client.release();
 }
 
@@ -178,10 +165,9 @@ async function getSourceEvents() {
 	UPDATE source_events se
 	SET changed = FALSE
 	FROM source_manifestations sm
-	WHERE se.changed = TRUE
-	AND se.event_id IS NULL AND sm.manifestation_id IS NOT NULL
-	AND sm.external_id = se.external_manifestation_id
-	RETURNING se.id,se.source,se.name,se.date,sm.manifestation_id
+	WHERE se.changed = TRUE AND sm.external_id = se.external_manifestation_id
+	RETURNING se.id,se.source,se.name,se.date,sm.manifestation_id,se.event_id
+	,(select start_time from events e where e.id = se.event_id) as start_time
 	`);
 
 	if(err) {
@@ -189,43 +175,50 @@ async function getSourceEvents() {
 		client.release();
 		return [];
 	}
-
 	client.release();
 	return res.rows;
 }
 
 async function handleSourceEvents(sourceEvents) {
 	const client = await getClient();
-	const groupedEvents = groupBy(sourceEvents, x => cleanString(x.name));
+	const groupedEvents = groupBy(sourceEvents, x => x.event_id || cleanString(x.name));
+	let res, err;
 
-	for(const event in groupedEvents) {
-		const events = groupedEvents[event];
+	for(const key in groupedEvents) {
+		const events = groupedEvents[key];
 		const sourceEventIds = events.map(x => x.id);
 		const eventName = events[0].name;
 		const eventDate = events[0].date;
 		const manifestationId = events[0].manifestation_id;
-		let res, err;
+		let eventId = events[0].event_id;
 
-		[res, err] = await client.exec(`
-		INSERT INTO events (name,start_time,manifestation_id) VALUES ($1,$2,$3) RETURNING id
-		`, [eventName, eventDate, manifestationId]);
-		if(err) {
-			console.log("INSERT INTO events: %s", err);
-			continue;
+		if(!eventId) {
+			[res, err] = await client.exec(`
+			INSERT INTO events (name,start_time,manifestation_id) VALUES ($1,$2,$3) RETURNING id
+			`, [eventName, eventDate, manifestationId]);
+			if(err) {
+				console.log("INSERT INTO events: %s", err);
+				continue;
+			}
+			eventId = res.rows[0].id;
+
+			[res, err] = await client.exec(`
+			UPDATE source_events
+			SET event_id = $1
+			WHERE id = ANY($2)
+			`, [eventId, sourceEventIds]);
+			if(err) {
+				console.log("UPDATE source_events: %s", err);
+				continue;
+			}
 		}
-		const eventId = res.rows[0].id;
 
-		[res, err] = await client.exec(`
-		UPDATE source_events
-		SET event_id = $1
-		WHERE id = ANY($2)
-		`, [eventId, sourceEventIds]);
-		if(err) {
-			console.log("UPDATE source_events: %s", err);
-			continue;
+		const isDateChanged = events.some(x => x.start_time.getTime() != eventDate.getTime());
+
+		if(isDateChanged) {
+			/* TODO: handle data change in one or more sources */
 		}
 	}
-
 	client.release();
 }
 
