@@ -243,14 +243,91 @@ async function handleSourceEvents(sourceEvents) {
 	client.release();
 }
 
+async function getSourceMarkets() {
+	const client = await getClient();
+	const [res, err] = await client.exec(`
+	UPDATE source_markets sma
+	SET changed = FALSE
+	FROM source_groups sg
+	WHERE sma.changed = TRUE
+	AND sg.external_id = sma.external_group_id
+	AND sg.group_id IS NOT NULL
+	RETURNING sma.id,sma.source,sma.name,sma.market_id
+	`);
+
+	if(err) {
+		console.log("Events error: %s", err);
+		client.release();
+		return [];
+	}
+	client.release();
+	return res.rows;
+}
+
+async function handleSourceMarkets(sourceMarkets) {
+	const client = await getClient();
+	const groupedMarkets = groupBy(sourceMarkets, x => x.market_id || cleanString(x.name));
+
+	for(const market in groupedMarkets) {
+		const markets = groupedMarkets[market];
+		const sourceMarketIds = markets.map(x => x.id);
+		const marketName = markets[0].name;
+		let marketId = markets[0].market_id;
+		let res, err;
+
+		if(!marketId) {
+			[res, err] = await client.exec(`
+			SELECT id FROM markets
+			WHERE name = $1
+			`, [marketName]);
+			if(err)
+				console.log("SELECT FROM markets: %s", err);
+			else if(res.rows.length)
+				marketId = res.rows[0].id;
+
+			if(!marketId) {
+				[res, err] = await client.exec(`
+				INSERT INTO markets (name) VALUES ($1) RETURNING id
+				`, [marketName]);
+				if(err) {
+					console.log("INSERT INTO markets: %s", err);
+					continue;
+				}
+				marketId = res.rows[0].id;
+			}
+		}
+
+		const toMapIds = [];
+		sourceMarketIds.forEach(id => {
+			const m = markets.find(x => x.id == id);
+
+			if(!m.market_id)
+				toMapIds.push(id);
+		});
+
+		[res, err] = await client.exec(`
+		UPDATE source_markets
+		SET market_id = $1
+		WHERE id = ANY($2)
+		`, [marketId, toMapIds]);
+		if(err) {
+			console.log("UPDATE source_markets: %s", err);
+			continue;
+		}
+	}
+	client.release();
+}
+
 export async function processDataSources() {
 	const sourceGroups = await getSourceGroups();
 	const sourceCategories = await getSourceCategories();
 	const sourceManifestations = await getSourceManifestations();
 	const sourceEvents = await getSourceEvents();
+	const sourceMarkets = await getSourceMarkets();
 
 	await handleSourceGroups(sourceGroups);
 	await handleSourceCategories(sourceCategories);
 	await handleSourceManifestations(sourceManifestations);
 	await handleSourceEvents(sourceEvents);
+	await handleSourceMarkets(sourceMarkets);
 }
