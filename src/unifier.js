@@ -11,7 +11,7 @@ async function getSourceGroups() {
 	`);
 
 	if(err) {
-		console.log("Groups error: %s", err);
+		console.log("getSourceGroups(): %s", err);
 		client.release();
 		return [];
 	}
@@ -64,7 +64,7 @@ async function getSourceCategories() {
 	`);
 
 	if(err) {
-		console.log("Categories error: %s", err);
+		console.log("getSourceManifestations(): %s", err);
 		client.release();
 		return [];
 	}
@@ -118,7 +118,7 @@ async function getSourceManifestations() {
 	`);
 
 	if(err) {
-		console.log("Manifestations error: %s", err);
+		console.log("getSourceManifestations(): %s", err);
 		client.release();
 		return [];
 	}
@@ -171,7 +171,7 @@ async function getSourceEvents() {
 	`);
 
 	if(err) {
-		console.log("Events error: %s", err);
+		console.log("getSourceEvents(): %s", err);
 		client.release();
 		return [];
 	}
@@ -224,14 +224,16 @@ async function handleSourceEvents(sourceEvents) {
 				toMapIds.push(id);
 		});
 
-		[res, err] = await client.exec(`
-		UPDATE source_events
-		SET event_id = $1
-		WHERE id = ANY($2)
-		`, [eventId, sourceEventIds]);
-		if(err) {
-			console.log("UPDATE source_events: %s", err);
-			continue;
+		if(toMapIds) {
+			[res, err] = await client.exec(`
+			UPDATE source_events
+			SET event_id = $1
+			WHERE id = ANY($2)
+			`, [eventId, sourceEventIds]);
+			if(err) {
+				console.log("UPDATE source_events: %s", err);
+				continue;
+			}
 		}
 
 		const isDateChanged = events.some(x => x.start_time.getTime() != eventDate.getTime());
@@ -256,7 +258,7 @@ async function getSourceMarkets() {
 	`);
 
 	if(err) {
-		console.log("Events error: %s", err);
+		console.log("getSourceMarkets(): %s", err);
 		client.release();
 		return [];
 	}
@@ -305,18 +307,99 @@ async function handleSourceMarkets(sourceMarkets) {
 				toMapIds.push(id);
 		});
 
-		[res, err] = await client.exec(`
-		UPDATE source_markets
-		SET market_id = $1
-		WHERE id = ANY($2)
-		`, [marketId, toMapIds]);
-		if(err) {
-			console.log("UPDATE source_markets: %s", err);
-			continue;
+		if(toMapIds) {
+			[res, err] = await client.exec(`
+			UPDATE source_markets
+			SET market_id = $1
+			WHERE id = ANY($2)
+			`, [marketId, toMapIds]);
+			if(err) {
+				console.log("UPDATE source_markets: %s", err);
+				continue;
+			}
 		}
 	}
 	client.release();
 }
+
+async function getSourceParticipants() {
+	const client = await getClient();
+	const [res, err] = await client.exec(`
+	UPDATE source_participants sp
+	SET changed = FALSE
+	FROM source_events se
+	WHERE sp.changed = TRUE
+	AND se.external_id = sp.external_event_id
+	AND se.event_id IS NOT NULL
+	RETURNING sp.id,sp.source,sp.name,sp.participant_id,se.event_id
+	`);
+
+	if(err) {
+		console.log("getSourceParticipants(): %s", err);
+		client.release();
+		return [];
+	}
+	client.release();
+	return res.rows;
+}
+
+async function handleSourceParticipants(sourceParticipants) {
+	const client = await getClient();
+	const groupedParticipants = groupBy(sourceParticipants, x => x.participant_id || cleanString(x.name));
+
+	for(const key in groupedParticipants) {
+		const participants = groupedParticipants[key];
+		const sourceParticipantIds = participants.map(x => x.id);
+		const participantName = participants[0].name;
+		let participantId = participants[0].participant_id;
+		let res, err;
+
+		if(!participantId) {
+			[res, err] = await client.exec(`
+			SELECT id FROM participants
+			WHERE name = $1
+			`, [participantName]);
+			if(err)
+				console.log("handleSourceParticipants(): %s", err);
+			else if(res.rows.length)
+				participantId = res.rows[0].id;
+
+			if(!participantId) {
+				[res, err] = await client.exec(`
+				INSERT INTO participants (name) VALUES ($1) RETURNING id
+				`, [participantName]);
+				if(err) {
+					console.log("handleSourceParticipants(): %s", err);
+					continue;
+				}
+				participantId = res.rows[0].id;
+			}
+		}
+
+		const toMapIds = [];
+		sourceParticipantIds.forEach(id => {
+			const m = participants.find(x => x.id == id);
+
+			if(!m.participant_id)
+				toMapIds.push(id);
+		});
+
+		if(toMapIds) {
+			/* TODO: collects and bulk-update at the end */
+			[res, err] = await client.exec(`
+			UPDATE source_participants
+			SET participant_id = $1
+			WHERE id = ANY($2)
+			`, [participantId, toMapIds]);
+			if(err) {
+				console.log("handleSourceParticipants(): %s", err);
+				continue;
+			}
+		}
+	}
+	client.release();
+}
+
 
 export async function processDataSources() {
 	const sourceGroups = await getSourceGroups();
@@ -324,10 +407,12 @@ export async function processDataSources() {
 	const sourceManifestations = await getSourceManifestations();
 	const sourceEvents = await getSourceEvents();
 	const sourceMarkets = await getSourceMarkets();
+	const sourceParticipants = await getSourceParticipants();
 
 	await handleSourceGroups(sourceGroups);
 	await handleSourceCategories(sourceCategories);
 	await handleSourceManifestations(sourceManifestations);
 	await handleSourceEvents(sourceEvents);
 	await handleSourceMarkets(sourceMarkets);
+	await handleSourceParticipants(sourceParticipants);
 }
