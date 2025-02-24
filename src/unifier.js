@@ -193,24 +193,45 @@ async function handleSourceEvents(sourceEvents) {
 		let eventId = events[0].event_id;
 
 		if(!eventId) {
+			/*
 			[res, err] = await client.exec(`
-			INSERT INTO events (name,start_time,manifestation_id) VALUES ($1,$2,$3) RETURNING id
-			`, [eventName, eventDate, manifestationId]);
-			if(err) {
-				console.log("INSERT INTO events: %s", err);
-				continue;
-			}
-			eventId = res.rows[0].id;
+			SELECT id FROM events
+			WHERE name = $1
+			`, [eventName]);
+			if(err)
+				console.log("SELECT FROM events: %s", err);
+			else if(res.rows.length)
+				eventId = res.rows[0].id;
+			*/
 
-			[res, err] = await client.exec(`
-			UPDATE source_events
-			SET event_id = $1
-			WHERE id = ANY($2)
-			`, [eventId, sourceEventIds]);
-			if(err) {
-				console.log("UPDATE source_events: %s", err);
-				continue;
+			if(!eventId) {
+				[res, err] = await client.exec(`
+				INSERT INTO events (name,start_time,manifestation_id) VALUES ($1,$2,$3) RETURNING id
+				`, [eventName, eventDate, manifestationId]);
+				if(err) {
+					console.log("INSERT INTO events: %s", err);
+					continue;
+				}
+				eventId = res.rows[0].id;
 			}
+		}
+
+		const toMapIds = [];
+		sourceEventIds.forEach(id => {
+			const m = events.find(x => x.id == id);
+
+			if(!m.event_id)
+				toMapIds.push(id);
+		});
+
+		[res, err] = await client.exec(`
+		UPDATE source_events
+		SET event_id = $1
+		WHERE id = ANY($2)
+		`, [eventId, sourceEventIds]);
+		if(err) {
+			console.log("UPDATE source_events: %s", err);
+			continue;
 		}
 
 		const isDateChanged = events.some(x => x.start_time.getTime() != eventDate.getTime());
