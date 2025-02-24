@@ -52,6 +52,7 @@ export function cleanString(s) {
 	return s.replace(/[^a-zA-Z0-9_.]/g, '').toLowerCase();
 }
 
+/* TODO: deprecated by Object.groupBy() */
 export function groupBy(items, getKey, getVal) {
 	const ret = {};
 

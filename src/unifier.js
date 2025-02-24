@@ -213,6 +213,12 @@ async function handleSourceEvents(sourceEvents) {
 					continue;
 				}
 				eventId = res.rows[0].id;
+
+				/* We can assume events and participants always comes together.
+				 * In fact handleEvents() receives the events along with all the
+				 * participants. Thus it's safe to process participants here. */
+				/* TODO: process participants and get rid of getSourceParticipants()
+				 * and handleSourceParticipants() */
 			}
 		}
 
@@ -399,7 +405,6 @@ async function handleSourceParticipants(sourceParticipants) {
 	}
 	client.release();
 }
-
 
 export async function processDataSources() {
 	const sourceGroups = await getSourceGroups();
