@@ -1,4 +1,11 @@
-import {getClient} from "./db.js";
+/*
+ * TODO
+ *
+ * - Add team_name into event_participants?
+ * - Use bulk updates/insert whenever possible.
+ */
+
+import {getClient, insertMany, updateMany} from "./db.js";
 import {cleanString,groupBy} from "./lib.js";
 
 async function getSourceGroups() {
@@ -182,6 +189,7 @@ async function getSourceEvents() {
 async function handleSourceEvents(sourceEvents) {
 	const client = await getClient();
 	const groupedEvents = groupBy(sourceEvents, x => x.event_id || cleanString(x.name));
+	const newEventIds = [];
 	let res, err;
 
 	for(const key in groupedEvents) {
@@ -213,12 +221,7 @@ async function handleSourceEvents(sourceEvents) {
 					continue;
 				}
 				eventId = res.rows[0].id;
-
-				/* We can assume events and participants always comes together.
-				 * In fact handleEvents() receives the events along with all the
-				 * participants. Thus it's safe to process participants here. */
-				/* TODO: process participants and get rid of getSourceParticipants()
-				 * and handleSourceParticipants() */
+				newEventIds.push(eventId);
 			}
 		}
 
@@ -242,13 +245,105 @@ async function handleSourceEvents(sourceEvents) {
 			}
 		}
 
-		const isDateChanged = events.some(x => x.start_time.getTime() != eventDate.getTime());
+		const isDateChanged = events.some(x => x.start_time && x.start_time.getTime() != eventDate.getTime());
 
 		if(isDateChanged) {
 			/* TODO: handle data change in one or more sources */
 		}
 	}
+
+	/* We can assume events and participants always comes together.
+	 * In fact handleEvents() receives the events along with all the
+	 * participants. Thus it's safe to process participants here. */
+	if(newEventIds.length)
+		await processEventsParticipants(newEventIds, client);
+
 	client.release();
+}
+
+async function processEventsParticipants(eventIds, reuseClient) {
+	const client = reuseClient || await getClient();
+	let res, err;
+
+	[res, err] = await client.exec(`
+	UPDATE source_participants sp
+	SET changed = FALSE
+	FROM source_events se
+	WHERE sp.changed = TRUE
+	AND se.event_id = ANY($1)
+	AND se.external_id = sp.external_event_id
+	AND sp.participant_id IS NULL -- just to be sure
+	RETURNING sp.id,sp.name,se.event_id
+	`, [eventIds]);
+
+	if(err) {
+		console.log("processEventsParticipants(): %s", err);
+		return;
+	}
+
+	const sourceParticipants = res.rows;
+	if(!sourceParticipants.length) {
+		client.release();
+		return;
+	}
+
+	let names = [];
+
+	sourceParticipants.forEach(sp => {
+		const key = cleanString(sp.name);
+
+		if(!names[key])
+			names[key] = sp.name;
+	});
+	names = Object.values(names);
+
+	[res, err] = await client.exec(`
+	SELECT name,id
+	FROM participants
+	WHERE name = ANY($1)
+	`, [names]);
+	if(err)
+		return console.log("processEventsParticipants(): %s", err);
+	const existingParticipants = res.rows;
+
+	let newParticipants = [];
+
+	/* filter out existing names */
+	names = names.filter(n => !existingParticipants.some(x => x.name == n));
+
+	if(names.length) {
+		[res, err] = await insertMany("participants", ["name"],
+			names.map(name => ({name})), "id", client);
+		if(err)
+			return console.log("processEventsParticipants(): %s", err);
+		newParticipants = res.rows;
+	}
+
+	const participants = [...existingParticipants, ...newParticipants];
+
+	participants.forEach(p => p.key = cleanString(p.name));
+
+	const newEventParticipants = sourceParticipants.map(sp => ({
+		event_id: sp.event_id,
+		participant_id: participants.find(p => p.key == cleanString(sp.name)).id
+	}));
+
+	[res, err] = await insertMany("event_participants",
+			["event_id", "participant_id"], newEventParticipants,
+			null, client);
+	if(err)
+		console.log("processEventsParticipants(): %s", err);
+
+	const updSourceParticipants = sourceParticipants.map(sp => ({
+		id: sp.id,
+		participant_id: participants.find(p => p.key == cleanString(sp.name)).id
+	}));
+	[res, err] = await updateMany("source_participants", ["participant_id::integer"], updSourceParticipants);
+	if(err)
+		console.log("processEventsParticipants(): %s", err);
+
+	if(!reuseClient)
+		client.release();
 }
 
 async function getSourceMarkets() {
@@ -328,96 +423,16 @@ async function handleSourceMarkets(sourceMarkets) {
 	client.release();
 }
 
-async function getSourceParticipants() {
-	const client = await getClient();
-	const [res, err] = await client.exec(`
-	UPDATE source_participants sp
-	SET changed = FALSE
-	FROM source_events se
-	WHERE sp.changed = TRUE
-	AND se.external_id = sp.external_event_id
-	AND se.event_id IS NOT NULL
-	RETURNING sp.id,sp.source,sp.name,sp.participant_id,se.event_id
-	`);
-
-	if(err) {
-		console.log("getSourceParticipants(): %s", err);
-		client.release();
-		return [];
-	}
-	client.release();
-	return res.rows;
-}
-
-async function handleSourceParticipants(sourceParticipants) {
-	const client = await getClient();
-	const groupedParticipants = groupBy(sourceParticipants, x => x.participant_id || cleanString(x.name));
-
-	for(const key in groupedParticipants) {
-		const participants = groupedParticipants[key];
-		const sourceParticipantIds = participants.map(x => x.id);
-		const participantName = participants[0].name;
-		let participantId = participants[0].participant_id;
-		let res, err;
-
-		if(!participantId) {
-			[res, err] = await client.exec(`
-			SELECT id FROM participants
-			WHERE name = $1
-			`, [participantName]);
-			if(err)
-				console.log("handleSourceParticipants(): %s", err);
-			else if(res.rows.length)
-				participantId = res.rows[0].id;
-
-			if(!participantId) {
-				[res, err] = await client.exec(`
-				INSERT INTO participants (name) VALUES ($1) RETURNING id
-				`, [participantName]);
-				if(err) {
-					console.log("handleSourceParticipants(): %s", err);
-					continue;
-				}
-				participantId = res.rows[0].id;
-			}
-		}
-
-		const toMapIds = [];
-		sourceParticipantIds.forEach(id => {
-			const m = participants.find(x => x.id == id);
-
-			if(!m.participant_id)
-				toMapIds.push(id);
-		});
-
-		if(toMapIds) {
-			/* TODO: collects and bulk-update at the end */
-			[res, err] = await client.exec(`
-			UPDATE source_participants
-			SET participant_id = $1
-			WHERE id = ANY($2)
-			`, [participantId, toMapIds]);
-			if(err) {
-				console.log("handleSourceParticipants(): %s", err);
-				continue;
-			}
-		}
-	}
-	client.release();
-}
-
 export async function processDataSources() {
 	const sourceGroups = await getSourceGroups();
 	const sourceCategories = await getSourceCategories();
 	const sourceManifestations = await getSourceManifestations();
 	const sourceEvents = await getSourceEvents();
 	const sourceMarkets = await getSourceMarkets();
-	const sourceParticipants = await getSourceParticipants();
 
 	await handleSourceGroups(sourceGroups);
 	await handleSourceCategories(sourceCategories);
 	await handleSourceManifestations(sourceManifestations);
 	await handleSourceEvents(sourceEvents);
 	await handleSourceMarkets(sourceMarkets);
-	await handleSourceParticipants(sourceParticipants);
 }
