@@ -1,7 +1,6 @@
 /*
  * TODO
  *
- * - Use a single Postgres client for all the work (call getClient() only once)
  * - Add team_name into event_participants?
  * - Use bulk updates/insert whenever possible.
  */
@@ -9,8 +8,9 @@
 import {getClient,insertMany,updateMany,upsert} from "./db.js";
 import {cleanString,groupBy,outcomeStatus} from "./lib.js";
 
+let client;
+
 async function getSourceGroups() {
-	const client = await getClient();
 	const [res, err] = await client.exec(`
 	UPDATE source_groups
 	SET changed = FALSE
@@ -20,15 +20,13 @@ async function getSourceGroups() {
 
 	if(err) {
 		console.log("getSourceGroups(): %s", err);
-		client.release();
 		return [];
 	}
-	client.release();
 	return res.rows;
 }
 
-async function handleSourceGroups(sourceGroups) {
-	const client = await getClient();
+async function processSourceGroups() {
+	const sourceGroups = await getSourceGroups();
 	const groupedGroups = groupBy(sourceGroups, x => cleanString(x.name));
 
 	for(const group in groupedGroups) {
@@ -56,11 +54,9 @@ async function handleSourceGroups(sourceGroups) {
 			continue;
 		}
 	}
-	client.release();
 }
 
 async function getSourceCategories() {
-	const client = await getClient();
 	const [res, err] = await client.exec(`
 	UPDATE source_categories sc
 	SET changed = FALSE
@@ -73,15 +69,13 @@ async function getSourceCategories() {
 
 	if(err) {
 		console.log("getSourceManifestations(): %s", err);
-		client.release();
 		return [];
 	}
-	client.release();
 	return res.rows;
 }
 
-async function handleSourceCategories(sourceCategories) {
-	const client = await getClient();
+async function processSourceCategories() {
+	const sourceCategories = await getSourceCategories();
 	const groupedCategories = groupBy(sourceCategories, x => cleanString(x.name));
 
 	for(const category in groupedCategories) {
@@ -110,11 +104,9 @@ async function handleSourceCategories(sourceCategories) {
 			continue;
 		}
 	}
-	client.release();
 }
 
 async function getSourceManifestations() {
-	const client = await getClient();
 	const [res, err] = await client.exec(`
 	UPDATE source_manifestations sm
 	SET changed = FALSE
@@ -127,15 +119,13 @@ async function getSourceManifestations() {
 
 	if(err) {
 		console.log("getSourceManifestations(): %s", err);
-		client.release();
 		return [];
 	}
-	client.release();
 	return res.rows;
 }
 
-async function handleSourceManifestations(sourceManifestations) {
-	const client = await getClient();
+async function processSourceManifestations() {
+	const sourceManifestations = await getSourceManifestations();
 	const groupedManifestations = groupBy(sourceManifestations, x => cleanString(x.name));
 
 	for(const manifestation in groupedManifestations) {
@@ -164,11 +154,9 @@ async function handleSourceManifestations(sourceManifestations) {
 			continue;
 		}
 	}
-	client.release();
 }
 
 async function getSourceEvents() {
-	const client = await getClient();
 	const [res, err] = await client.exec(`
 	UPDATE source_events se
 	SET changed = FALSE
@@ -180,15 +168,13 @@ async function getSourceEvents() {
 
 	if(err) {
 		console.log("getSourceEvents(): %s", err);
-		client.release();
 		return [];
 	}
-	client.release();
 	return res.rows;
 }
 
-async function handleSourceEvents(sourceEvents) {
-	const client = await getClient();
+async function processSourceEvents() {
+	const sourceEvents = await getSourceEvents();
 	const groupedEvents = groupBy(sourceEvents, x => x.event_id || cleanString(x.name));
 	const newEventIds = [];
 	let res, err;
@@ -257,13 +243,10 @@ async function handleSourceEvents(sourceEvents) {
 	 * In fact handleEvents() receives the events along with all the
 	 * participants. Thus it's safe to process participants here. */
 	if(newEventIds.length)
-		await processEventsParticipants(newEventIds, client);
-
-	client.release();
+		await processEventsParticipants(newEventIds);
 }
 
-async function processEventsParticipants(eventIds, reuseClient) {
-	const client = reuseClient || await getClient();
+async function processEventsParticipants(eventIds) {
 	let res, err;
 
 	[res, err] = await client.exec(`
@@ -283,10 +266,8 @@ async function processEventsParticipants(eventIds, reuseClient) {
 	}
 
 	const sourceParticipants = res.rows;
-	if(!sourceParticipants.length) {
-		client.release();
+	if(!sourceParticipants.length)
 		return;
-	}
 
 	let names = [];
 
@@ -342,13 +323,9 @@ async function processEventsParticipants(eventIds, reuseClient) {
 	[res, err] = await updateMany("source_participants", ["participant_id::integer"], updSourceParticipants);
 	if(err)
 		console.log("processEventsParticipants(): %s", err);
-
-	if(!reuseClient)
-		client.release();
 }
 
 async function getSourceMarkets() {
-	const client = await getClient();
 	const [res, err] = await client.exec(`
 	UPDATE source_markets sma
 	SET changed = FALSE
@@ -361,15 +338,13 @@ async function getSourceMarkets() {
 
 	if(err) {
 		console.log("getSourceMarkets(): %s", err);
-		client.release();
 		return [];
 	}
-	client.release();
 	return res.rows;
 }
 
-async function handleSourceMarkets(sourceMarkets) {
-	const client = await getClient();
+async function processSourceMarkets() {
+	const sourceMarkets = await getSourceMarkets();
 	const groupedMarkets = groupBy(sourceMarkets, x => x.market_id || cleanString(x.name));
 
 	for(const market in groupedMarkets) {
@@ -421,11 +396,9 @@ async function handleSourceMarkets(sourceMarkets) {
 			}
 		}
 	}
-	client.release();
 }
 
 async function getSourceOutcomes() {
-	const client = await getClient();
 	const [res, err] = await client.exec(`
 	UPDATE source_outcomes so
 	SET changed = FALSE
@@ -442,19 +415,16 @@ async function getSourceOutcomes() {
 	`);
 	if(err) {
 		console.log("getSourceOutcomes(): %s", err);
-		client.release();
 		return [];
 	}
-
-	client.release();
 	return res.rows;
 }
 
-async function handleSourceOutcomes(sourceOutcomes) {
+async function processSourceOutcomes() {
+	const sourceOutcomes = await getSourceOutcomes();
 	if(!sourceOutcomes.length)
 		return;
 
-	const client = await getClient();
 	const partialOutcomes = sourceOutcomes.filter(x => !x.outcome_id || !x.market_id || !x.event_id);
 	const outcomeNames = [...new Set(partialOutcomes.filter(x => !x.outcome_id).map(x => x.name))];
 	const updSourceOutcomes = [];
@@ -474,7 +444,6 @@ async function handleSourceOutcomes(sourceOutcomes) {
 		[res, err] = await upsert("outcomes", outcomeNames.map(x => ({name:x})), ["name"], ["name"], ["name"], false);
 		if(err) {
 			console.log("handleSourceOutcomes(): %s", err);
-			client.release();
 			return;
 		}
 	}
@@ -502,11 +471,9 @@ async function handleSourceOutcomes(sourceOutcomes) {
 
 	if(fullOutcomes.length)
 		processFullOutcomes(fullOutcomes);
-	client.release();
 }
 
 async function processFullOutcomes(fullOutcomes) {
-	const client = await getClient();
 	const tuples = fullOutcomes.map(x => [x.event_id, x.market_id, x.outcome_id]);
 	const values = tuples.map((_, i) => `($${i * 3 + 1}::integer, $${i * 3 + 2}::integer, $${i * 3 + 3}::integer)`).join(',');
 	let res, err;
@@ -556,22 +523,17 @@ async function processFullOutcomes(fullOutcomes) {
 		if(err)
 			console.log("processFullOutcomes(): %s", err);
 	}
-
-	client.release();
 }
 
 export async function processDataSources() {
-	const sourceGroups = await getSourceGroups();
-	const sourceCategories = await getSourceCategories();
-	const sourceManifestations = await getSourceManifestations();
-	const sourceEvents = await getSourceEvents();
-	const sourceMarkets = await getSourceMarkets();
-	const sourceOutcomes = await getSourceOutcomes();
+	client = await getClient();
 
-	await handleSourceGroups(sourceGroups);
-	await handleSourceCategories(sourceCategories);
-	await handleSourceManifestations(sourceManifestations);
-	await handleSourceEvents(sourceEvents);
-	await handleSourceMarkets(sourceMarkets);
-	await handleSourceOutcomes(sourceOutcomes);
+	await processSourceGroups();
+	await processSourceCategories();
+	await processSourceManifestations();
+	await processSourceEvents();
+	await processSourceMarkets();
+	await processSourceOutcomes();
+
+	client.release();
 }
