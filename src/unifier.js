@@ -6,9 +6,9 @@
  */
 
 import {getClient,insertMany,updateMany,upsert} from "./db.js";
-import {cleanString,groupBy,outcomeStatus} from "./lib.js";
+import {cleanString,entityStatus,entityTypes,groupBy,matchStatus,outcomeStatus} from "./lib.js";
 
-let client;
+let client; /* shared between processors */
 
 async function getSourceGroups() {
 	const [res, err] = await client.exec(`
@@ -28,6 +28,7 @@ async function getSourceGroups() {
 async function processSourceGroups() {
 	const sourceGroups = await getSourceGroups();
 	const groupedGroups = groupBy(sourceGroups, x => cleanString(x.name));
+	const updates = [];
 
 	for(const group in groupedGroups) {
 		const groups = groupedGroups[group];
@@ -53,7 +54,18 @@ async function processSourceGroups() {
 			console.log("UPDATE source_groups: %s", err);
 			continue;
 		}
+
+		updates.push({
+			type: "group",
+			state: entityStatus.CREATED,
+			data: {
+				id: groupId,
+				name: groupName
+			}
+		});
 	}
+
+	return updates;
 }
 
 async function getSourceCategories() {
@@ -77,6 +89,7 @@ async function getSourceCategories() {
 async function processSourceCategories() {
 	const sourceCategories = await getSourceCategories();
 	const groupedCategories = groupBy(sourceCategories, x => cleanString(x.name));
+	const updates = [];
 
 	for(const category in groupedCategories) {
 		const categories = groupedCategories[category];
@@ -103,7 +116,19 @@ async function processSourceCategories() {
 			console.log("UPDATE source_categories: %s", err);
 			continue;
 		}
+
+		updates.push({
+			type: "category",
+			state: entityStatus.CREATED,
+			data: {
+				id: categoryId,
+				name: categoryName,
+				groupId
+			}
+		});
 	}
+
+	return updates;
 }
 
 async function getSourceManifestations() {
@@ -127,6 +152,7 @@ async function getSourceManifestations() {
 async function processSourceManifestations() {
 	const sourceManifestations = await getSourceManifestations();
 	const groupedManifestations = groupBy(sourceManifestations, x => cleanString(x.name));
+	const updates = [];
 
 	for(const manifestation in groupedManifestations) {
 		const manifestations = groupedManifestations[manifestation];
@@ -153,7 +179,19 @@ async function processSourceManifestations() {
 			console.log("UPDATE source_manifestations: %s", err);
 			continue;
 		}
+
+		updates.push({
+			type: "manifestation",
+			state: entityStatus.CREATED,
+			data: {
+				id: manifestationId,
+				name: manifestationName,
+				categoryId
+			}
+		});
 	}
+
+	return updates;
 }
 
 async function getSourceEvents() {
@@ -177,6 +215,8 @@ async function processSourceEvents() {
 	const sourceEvents = await getSourceEvents();
 	const groupedEvents = groupBy(sourceEvents, x => x.event_id || cleanString(x.name));
 	const newEventIds = [];
+	const updates = [];
+	let eventParticipantsUpdates = [];
 	let res, err;
 
 	for(const key in groupedEvents) {
@@ -194,7 +234,7 @@ async function processSourceEvents() {
 			WHERE name = $1
 			`, [eventName]);
 			if(err)
-				console.log("SELECT FROM events: %s", err);
+				console.log("processSourceEvents(): %s", err);
 			else if(res.rows.length)
 				eventId = res.rows[0].id;
 			*/
@@ -204,11 +244,27 @@ async function processSourceEvents() {
 				INSERT INTO events (name,start_time,manifestation_id) VALUES ($1,$2,$3) RETURNING id
 				`, [eventName, eventDate, manifestationId]);
 				if(err) {
-					console.log("INSERT INTO events: %s", err);
+					console.log("processSourceEvents(): %s", err);
 					continue;
 				}
 				eventId = res.rows[0].id;
 				newEventIds.push(eventId);
+				updates.push({
+					type: "event",
+					state: entityStatus.CREATED,
+					data: {
+						state: matchStatus.ACTIVE, /* XXX are we sure it's active? */
+						id: eventId,
+						startTime: eventDate, /* XXX to ISO? */
+
+						/* filled later */
+						groupName: null,
+						categoryName: null,
+						manifestationName: null,
+						homeTeam: null,
+						awayTeam: null
+					}
+				});
 			}
 		}
 
@@ -227,7 +283,7 @@ async function processSourceEvents() {
 			WHERE id = ANY($2)
 			`, [eventId, sourceEventIds]);
 			if(err) {
-				console.log("UPDATE source_events: %s", err);
+				console.log("processSourceEvents(): %s", err);
 				continue;
 			}
 		}
@@ -243,10 +299,50 @@ async function processSourceEvents() {
 	 * In fact handleEvents() receives the events along with all the
 	 * participants. Thus it's safe to process participants here. */
 	if(newEventIds.length)
-		await processEventsParticipants(newEventIds);
+		eventParticipantsUpdates = await processEventsParticipants(newEventIds);
+
+	const eventUpdates = updates.filter(x => x.type == "event" && x.state == entityStatus.CREATED);
+
+	if(eventUpdates.length) {
+		[res, err] = await client.exec(`
+		SELECT e.id as event_id
+		,p.name as participantname
+		,m.name as manifestationname
+		,c.name as categoryname
+		,g.name as groupname
+		FROM events e
+		JOIN event_participants ep ON ep.event_id = e.id
+		JOIN participants p on p.id = ep.participant_id
+		JOIN manifestations m ON m.id = e.manifestation_id
+		JOIN categories c ON c.id = m.category_id
+		JOIN groups g ON g.id = c.group_id
+		WHERE e.id = ANY($1)
+		`, [eventUpdates.map(x => x.event_id)]);
+		if(err)
+			console.log("processSourceEvents(): %s", err);
+		const updateInfos = err ? [] : res.rows;
+
+		if(updateInfos.length) {
+			eventUpdates.forEach(upd => {
+				const info = updateInfos.filter(x => x.event_id == upd.event_id);
+
+				Object.assign(upd, {
+					groupName: info.groupname,
+					categoryName: info.categoryname,
+					manifestationName: info.manifestationname,
+					homeTeam: info.find(x => x.team_name == "home"),
+					awayTeam: info.find(x => x.team_name == "away")
+				});
+			});
+		}
+	}
+
+	return [];
+	//return [...updates, eventParticipantsUpdates];
 }
 
 async function processEventsParticipants(eventIds) {
+	const updates = [];
 	let res, err;
 
 	[res, err] = await client.exec(`
@@ -323,6 +419,7 @@ async function processEventsParticipants(eventIds) {
 	[res, err] = await updateMany("source_participants", ["participant_id::integer"], updSourceParticipants);
 	if(err)
 		console.log("processEventsParticipants(): %s", err);
+	return updates;
 }
 
 async function getSourceMarkets() {
@@ -346,6 +443,7 @@ async function getSourceMarkets() {
 async function processSourceMarkets() {
 	const sourceMarkets = await getSourceMarkets();
 	const groupedMarkets = groupBy(sourceMarkets, x => x.market_id || cleanString(x.name));
+	const updates = [];
 
 	for(const market in groupedMarkets) {
 		const markets = groupedMarkets[market];
@@ -396,6 +494,7 @@ async function processSourceMarkets() {
 			}
 		}
 	}
+	return updates;
 }
 
 async function getSourceOutcomes() {
@@ -422,12 +521,15 @@ async function getSourceOutcomes() {
 
 async function processSourceOutcomes() {
 	const sourceOutcomes = await getSourceOutcomes();
+
 	if(!sourceOutcomes.length)
-		return;
+		return [];
 
 	const partialOutcomes = sourceOutcomes.filter(x => !x.outcome_id || !x.market_id || !x.event_id);
 	const outcomeNames = [...new Set(partialOutcomes.filter(x => !x.outcome_id).map(x => x.name))];
 	const updSourceOutcomes = [];
+	const updates = [];
+	let fullOutcomesUpdates = [];
 	let outcomes = [], res, err;
 
 	if(outcomeNames.length) {
@@ -470,12 +572,14 @@ async function processSourceOutcomes() {
 	const fullOutcomes = sourceOutcomes.filter(x => x.outcome_id && x.market_id && x.event_id);
 
 	if(fullOutcomes.length)
-		processFullOutcomes(fullOutcomes);
+		fullOutcomesUpdates = await processFullOutcomes(fullOutcomes);
+	return [...updates, ...fullOutcomesUpdates];
 }
 
 async function processFullOutcomes(fullOutcomes) {
 	const tuples = fullOutcomes.map(x => [x.event_id, x.market_id, x.outcome_id]);
 	const values = tuples.map((_, i) => `($${i * 3 + 1}::integer, $${i * 3 + 2}::integer, $${i * 3 + 3}::integer)`).join(',');
+	const updates = [];
 	let res, err;
 
 	[res, err] = await client.exec(`
@@ -523,17 +627,23 @@ async function processFullOutcomes(fullOutcomes) {
 		if(err)
 			console.log("processFullOutcomes(): %s", err);
 	}
+	return updates;
+}
+
+function sendUpdates(updates) {
+	console.log("Updates", updates);
 }
 
 export async function processDataSources() {
 	client = await getClient();
-
-	await processSourceGroups();
-	await processSourceCategories();
-	await processSourceManifestations();
-	await processSourceEvents();
-	await processSourceMarkets();
-	await processSourceOutcomes();
-
+	const updates = [
+		...await processSourceGroups(),
+		...await processSourceCategories(),
+		...await processSourceManifestations(),
+		...await processSourceEvents(),
+		...await processSourceMarkets(),
+		...await processSourceOutcomes()
+	];
 	client.release();
+	sendUpdates(updates);
 }
