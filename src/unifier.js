@@ -1,12 +1,13 @@
 /*
  * TODO
  *
+ * - Use a single Postgres client for all the work (call getClient() only once)
  * - Add team_name into event_participants?
  * - Use bulk updates/insert whenever possible.
  */
 
-import {getClient, insertMany, updateMany} from "./db.js";
-import {cleanString,groupBy} from "./lib.js";
+import {getClient,insertMany,updateMany,upsert} from "./db.js";
+import {cleanString,groupBy,outcomeStatus} from "./lib.js";
 
 async function getSourceGroups() {
 	const client = await getClient();
@@ -423,16 +424,154 @@ async function handleSourceMarkets(sourceMarkets) {
 	client.release();
 }
 
+async function getSourceOutcomes() {
+	const client = await getClient();
+	const [res, err] = await client.exec(`
+	UPDATE source_outcomes so
+	SET changed = FALSE
+	FROM source_markets sm
+	JOIN source_events se ON se.event_id IS NOT NULL
+	WHERE so.changed = TRUE
+	-- AND ( so.outcome_id IS NULL OR so.market_id IS NULL OR so.event_id IS NULL)
+	AND se.external_id = so.external_event_id
+	AND sm.external_id = so.external_market_id
+	AND sm.market_id IS NOT NULL
+	RETURNING so.id,so.source,so.name,so.value,so.updated_at
+	,so.outcome_id,so.market_id,so.event_id
+	,sm.market_id as real_market_id,se.event_id as real_event_id
+	`);
+	if(err) {
+		console.log("getSourceOutcomes(): %s", err);
+		client.release();
+		return [];
+	}
+
+	client.release();
+	return res.rows;
+}
+
+async function handleSourceOutcomes(sourceOutcomes) {
+	if(!sourceOutcomes.length)
+		return;
+
+	const client = await getClient();
+	const partialOutcomes = sourceOutcomes.filter(x => !x.outcome_id || !x.market_id || !x.event_id);
+	const outcomeNames = [...new Set(partialOutcomes.filter(x => !x.outcome_id).map(x => x.name))];
+	const updSourceOutcomes = [];
+	let outcomes = [], res, err;
+
+	if(outcomeNames.length) {
+		[res, err] = await client.exec(`
+		SELECT id,name
+		FROM outcomes
+		WHERE name = ANY($1)
+		`, [outcomeNames]);
+		if(err)
+			console.log("handleSourceOutcomes(): %s", err);
+		else
+			outcomes = res.rows;
+
+		[res, err] = await upsert("outcomes", outcomeNames.map(x => ({name:x})), ["name"], ["name"], ["name"], false);
+		if(err) {
+			console.log("handleSourceOutcomes(): %s", err);
+			client.release();
+			return;
+		}
+	}
+
+	partialOutcomes.forEach(so => {
+		const upd = {
+			id: so.id,
+			outcome_id: so.outcome_id || outcomes.find(x => x.name == so.name).id,
+			market_id: so.market_id || so.real_market_id,
+			event_id: so.event_id || so.real_event_id
+		};
+
+		Object.assign(so, upd);
+		updSourceOutcomes.push(upd);
+	});
+
+	if(updSourceOutcomes.length) {
+		[res, err] = await updateMany("source_outcomes",
+			["outcome_id::integer", "market_id::integer", "event_id::integer"], updSourceOutcomes);
+		if(err)
+			console.log("handleSourceOutcomes(): %s", err);
+	}
+
+	const fullOutcomes = sourceOutcomes.filter(x => x.outcome_id && x.market_id && x.event_id);
+
+	if(fullOutcomes.length)
+		processFullOutcomes(fullOutcomes);
+	client.release();
+}
+
+async function processFullOutcomes(fullOutcomes) {
+	const client = await getClient();
+	const tuples = fullOutcomes.map(x => [x.event_id, x.market_id, x.outcome_id]);
+	const values = tuples.map((_, i) => `($${i * 3 + 1}::integer, $${i * 3 + 2}::integer, $${i * 3 + 3}::integer)`).join(',');
+	let res, err;
+
+	[res, err] = await client.exec(`
+	SELECT event_id,market_id,outcome_id,state,value
+	FROM event_outcomes
+	WHERE (event_id, market_id, outcome_id) = ANY(ARRAY[${values}])
+	`, tuples.flat());
+	if(err)
+		console.log("handleSourceOutcomes(): %s", err);
+	const eventOutcomes = res.rows;
+
+	const groupedOutcomes = groupBy(fullOutcomes, x => [x.event_id, x.market_id, x.outcome_id].join('.'));
+	const newEventOutcomes = [];
+	const updEventOutcomes = [];
+	for(const key in groupedOutcomes) {
+		const groupOutcomes = groupedOutcomes[key];
+		const value = Math.round(groupOutcomes.reduce((acc, item) => acc + item.value, 0) / (groupOutcomes.length || 1));
+		const state = groupOutcomes.every(x => x.state == outcomeStatus.ACTIVE) ? outcomeStatus.ACTIVE : outcomeStatus.DISABLED;
+		const {event_id,market_id,outcome_id} = groupOutcomes[0];
+		const processedOutcome = {event_id,market_id,outcome_id,value,state};
+
+		/* TODO: if updated_at is not the same for all for
+		 * event/market/outcome, then it has been removed. */
+
+		const isNew = !eventOutcomes.some(x => x.event_id == event_id
+			&& x.market_id == market_id
+			&& x.outcome_id == outcome_id);
+		if(isNew)
+			newEventOutcomes.push(processedOutcome);
+		else
+			updEventOutcomes.push(processedOutcome);
+	}
+
+	if(newEventOutcomes.length) {
+		[res, err] = await insertMany("event_outcomes",
+			["event_id", "market_id", "outcome_id", "value", "state"],
+			newEventOutcomes, null);
+		if(err)
+			console.log("processFullOutcomes(): %s", err);
+	}
+
+	if(updEventOutcomes.length) {
+		[res, err] = await updateMany("event_outcomes", ["value::integer", "state::integer"],
+			updEventOutcomes, ["event_id", "market_id", "outcome_id"]);
+		if(err)
+			console.log("processFullOutcomes(): %s", err);
+	}
+
+	client.release();
+}
+
 export async function processDataSources() {
 	const sourceGroups = await getSourceGroups();
 	const sourceCategories = await getSourceCategories();
 	const sourceManifestations = await getSourceManifestations();
 	const sourceEvents = await getSourceEvents();
 	const sourceMarkets = await getSourceMarkets();
+	const sourceOutcomes = await getSourceOutcomes();
 
 	await handleSourceGroups(sourceGroups);
 	await handleSourceCategories(sourceCategories);
 	await handleSourceManifestations(sourceManifestations);
 	await handleSourceEvents(sourceEvents);
 	await handleSourceMarkets(sourceMarkets);
+	await handleSourceOutcomes(sourceOutcomes);
 }
