@@ -6,7 +6,7 @@
  */
 
 import {getClient,insertMany,updateMany,upsert} from "./db.js";
-import {cleanString,entityStatus,entityTypes,groupBy,matchStatus,outcomeStatus} from "./lib.js";
+import {cleanString,entityStatus,groupBy,matchStatus,outcomeStatus,sendUpdates} from "./lib.js";
 
 let client; /* shared between processors */
 
@@ -665,8 +665,22 @@ async function processFullOutcomes(fullOutcomes) {
 	return updates;
 }
 
-function sendUpdates(updates) {
-	console.log("Updates", updates);
+async function handleUpdates(updates) {
+	if(!updates.length)
+		return;
+
+	console.log(updates);
+	const groups = updates.reduce((acc, upd) => {
+		const groupName = upd.type+"_list";
+		if(!acc[groupName])
+			acc[groupName] = [];
+		acc[groupName].push(upd);
+		return acc;
+	}, {});
+
+	Object.keys(groups).forEach(groupName => {
+		sendUpdates(groupName, groups[groupName]);
+	});
 }
 
 export async function processDataSources() {
@@ -680,5 +694,5 @@ export async function processDataSources() {
 		...await processSourceOutcomes()
 	];
 	client.release();
-	sendUpdates(updates);
+	handleUpdates(updates);
 }
