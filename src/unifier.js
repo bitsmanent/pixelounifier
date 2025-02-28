@@ -216,7 +216,6 @@ async function processSourceEvents() {
 	const groupedEvents = groupBy(sourceEvents, x => x.event_id || cleanString(x.name));
 	const newEventIds = [];
 	const updates = [];
-	let eventParticipantsUpdates = [];
 	let res, err;
 
 	for(const key in groupedEvents) {
@@ -299,17 +298,20 @@ async function processSourceEvents() {
 	 * In fact handleEvents() receives the events along with all the
 	 * participants. Thus it's safe to process participants here. */
 	if(newEventIds.length)
-		eventParticipantsUpdates = await processEventsParticipants(newEventIds);
+		await processEventsParticipants(newEventIds);
 
 	const eventUpdates = updates.filter(x => x.type == "event" && x.state == entityStatus.CREATED);
 
 	if(eventUpdates.length) {
+		/* TODO: this should be further optimized since processEventsParticipants()
+		 * already knows about participants thus we should be able to avoid 2 JOIN. */
 		[res, err] = await client.exec(`
 		SELECT e.id as event_id
-		,p.name as participantname
-		,m.name as manifestationname
-		,c.name as categoryname
-		,g.name as groupname
+		,m.name as mname
+		,c.name as cname
+		,g.name as gname
+		,p.name as pname
+		,ep.team_name
 		FROM events e
 		JOIN event_participants ep ON ep.event_id = e.id
 		JOIN participants p on p.id = ep.participant_id
@@ -317,32 +319,30 @@ async function processSourceEvents() {
 		JOIN categories c ON c.id = m.category_id
 		JOIN groups g ON g.id = c.group_id
 		WHERE e.id = ANY($1)
-		`, [eventUpdates.map(x => x.event_id)]);
+		`, [eventUpdates.map(x => x.data.id)]);
 		if(err)
 			console.log("processSourceEvents(): %s", err);
 		const updateInfos = err ? [] : res.rows;
 
 		if(updateInfos.length) {
 			eventUpdates.forEach(upd => {
-				const info = updateInfos.filter(x => x.event_id == upd.event_id);
+				const items = updateInfos.filter(x => x.event_id == upd.data.id);
+				const info = items[0];
 
-				Object.assign(upd, {
-					groupName: info.groupname,
-					categoryName: info.categoryname,
-					manifestationName: info.manifestationname,
-					homeTeam: info.find(x => x.team_name == "home"),
-					awayTeam: info.find(x => x.team_name == "away")
+				Object.assign(upd.data, {
+					groupName: info.gname,
+					categoryName: info.cname,
+					manifestationName: info.mname,
+					homeTeam: items.find(x => x.team_name == "home").pname,
+					awayTeam: items.find(x => x.team_name == "away").pname
 				});
 			});
 		}
 	}
-
-	return [];
-	//return [...updates, eventParticipantsUpdates];
+	return updates;
 }
 
 async function processEventsParticipants(eventIds) {
-	const updates = [];
 	let res, err;
 
 	[res, err] = await client.exec(`
@@ -353,17 +353,17 @@ async function processEventsParticipants(eventIds) {
 	AND se.event_id = ANY($1)
 	AND se.external_id = sp.external_event_id
 	AND sp.participant_id IS NULL -- just to be sure
-	RETURNING sp.id,sp.name,se.event_id
+	RETURNING sp.id,sp.name,se.event_id,sp.team_name
 	`, [eventIds]);
 
 	if(err) {
 		console.log("processEventsParticipants(): %s", err);
-		return;
+		return [];
 	}
 
 	const sourceParticipants = res.rows;
 	if(!sourceParticipants.length)
-		return;
+		return [];
 
 	let names = [];
 
@@ -380,8 +380,10 @@ async function processEventsParticipants(eventIds) {
 	FROM participants
 	WHERE name = ANY($1)
 	`, [names]);
-	if(err)
-		return console.log("processEventsParticipants(): %s", err);
+	if(err) {
+		console.log("processEventsParticipants(): %s", err);
+		return [];
+	}
 	const existingParticipants = res.rows;
 
 	let newParticipants = [];
@@ -392,8 +394,10 @@ async function processEventsParticipants(eventIds) {
 	if(names.length) {
 		[res, err] = await insertMany("participants", ["name"],
 			names.map(name => ({name})), "id", client);
-		if(err)
-			return console.log("processEventsParticipants(): %s", err);
+		if(err) {
+			console.log("processEventsParticipants(): %s", err);
+			return [];
+		}
 		newParticipants = res.rows;
 	}
 
@@ -403,11 +407,12 @@ async function processEventsParticipants(eventIds) {
 
 	const newEventParticipants = sourceParticipants.map(sp => ({
 		event_id: sp.event_id,
-		participant_id: participants.find(p => p.key == cleanString(sp.name)).id
+		participant_id: participants.find(p => p.key == cleanString(sp.name)).id,
+		team_name: sp.team_name
 	}));
 
 	[res, err] = await insertMany("event_participants",
-			["event_id", "participant_id"], newEventParticipants,
+			["event_id", "participant_id", "team_name"], newEventParticipants,
 			null, client);
 	if(err)
 		console.log("processEventsParticipants(): %s", err);
@@ -419,7 +424,6 @@ async function processEventsParticipants(eventIds) {
 	[res, err] = await updateMany("source_participants", ["participant_id::integer"], updSourceParticipants);
 	if(err)
 		console.log("processEventsParticipants(): %s", err);
-	return updates;
 }
 
 async function getSourceMarkets() {
@@ -471,6 +475,15 @@ async function processSourceMarkets() {
 					continue;
 				}
 				marketId = res.rows[0].id;
+
+				updates.push({
+					type: "market",
+					state: entityStatus.CREATED,
+					data: {
+						id: marketId,
+						name: marketName
+					}
+				});
 			}
 		}
 
@@ -511,6 +524,7 @@ async function getSourceOutcomes() {
 	RETURNING so.id,so.source,so.name,so.value,so.updated_at
 	,so.outcome_id,so.market_id,so.event_id
 	,sm.market_id as real_market_id,se.event_id as real_event_id
+	,(select name from outcomes where id = so.outcome_id) as outcomename
 	`);
 	if(err) {
 		console.log("getSourceOutcomes(): %s", err);
@@ -598,18 +612,18 @@ async function processFullOutcomes(fullOutcomes) {
 		const groupOutcomes = groupedOutcomes[key];
 		const value = Math.round(groupOutcomes.reduce((acc, item) => acc + item.value, 0) / (groupOutcomes.length || 1));
 		const state = groupOutcomes.every(x => x.state == outcomeStatus.ACTIVE) ? outcomeStatus.ACTIVE : outcomeStatus.DISABLED;
-		const {event_id,market_id,outcome_id} = groupOutcomes[0];
-		const processedOutcome = {event_id,market_id,outcome_id,value,state};
+		const {event_id,market_id,outcome_id,outcomename} = groupOutcomes[0];
+		const processedOutcome = {event_id,market_id,outcome_id,value,state,name:outcomename};
 
 		/* TODO: if updated_at is not the same for all for
 		 * event/market/outcome, then it has been removed. */
 
-		const isNew = !eventOutcomes.some(x => x.event_id == event_id
+		const eventOutcome = eventOutcomes.find(x => x.event_id == event_id
 			&& x.market_id == market_id
 			&& x.outcome_id == outcome_id);
-		if(isNew)
+		if(!eventOutcome)
 			newEventOutcomes.push(processedOutcome);
-		else
+		else if(value != eventOutcome.value || state != eventOutcome.state)
 			updEventOutcomes.push(processedOutcome);
 	}
 
@@ -617,15 +631,36 @@ async function processFullOutcomes(fullOutcomes) {
 		[res, err] = await insertMany("event_outcomes",
 			["event_id", "market_id", "outcome_id", "value", "state"],
 			newEventOutcomes, null);
-		if(err)
+		if(err) {
 			console.log("processFullOutcomes(): %s", err);
+		}
+		else {
+			newEventOutcomes.forEach(processedOutcome => {
+				updates.push({
+					type: "game",
+					state: entityStatus.CREATED,
+					data: processedOutcome
+				});
+			});
+		}
 	}
 
 	if(updEventOutcomes.length) {
 		[res, err] = await updateMany("event_outcomes", ["value::integer", "state::integer"],
 			updEventOutcomes, ["event_id", "market_id", "outcome_id"]);
-		if(err)
+		if(err) {
 			console.log("processFullOutcomes(): %s", err);
+		}
+		else {
+			updEventOutcomes.forEach(processedOutcome => {
+				updates.push({
+					type: "game",
+					state: entityStatus.UPDATED,
+					data: processedOutcome
+				});
+			});
+
+		}
 	}
 	return updates;
 }
