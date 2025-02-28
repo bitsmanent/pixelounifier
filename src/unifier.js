@@ -669,7 +669,6 @@ async function handleUpdates(updates) {
 	if(!updates.length)
 		return;
 
-	console.log(updates);
 	const groups = updates.reduce((acc, upd) => {
 		const groupName = upd.type+"_list";
 		if(!acc[groupName])
