@@ -152,23 +152,38 @@ async function getSourceManifestations() {
 async function processSourceManifestations() {
 	const sourceManifestations = await getSourceManifestations();
 	const groupedManifestations = groupBy(sourceManifestations, x => cleanString(x.name));
+	const maniNames = [...new Set(sourceManifestations.map(x => x.name))];
 	const updates = [];
+	let res, err;
 
-	for(const manifestation in groupedManifestations) {
-		const manifestations = groupedManifestations[manifestation];
-		const sourceManifestationIds = manifestations.map(x => x.id);
-		const manifestationName = manifestations[0].name;
-		const categoryId = manifestations[0].category_id;
-		let res, err;
+	[res, err] = await client.exec(`
+	SELECT id,name
+	FROM manifestations
+	WHERE name = ANY($1)
+	`, [maniNames]);
+	if(err) {
+		console.log("processSourceManifestations(): %s", err);
+		return [];
+	}
+	const manifestations = res.rows;
 
-		[res, err] = await client.exec(`
-		INSERT INTO manifestations (name,category_id) VALUES ($1,$2) RETURNING id
-		`, [manifestationName, categoryId]);
-		if(err) {
-			console.log("INSERT INTO manifestations: %s", err);
-			continue;
+	for(const key in groupedManifestations) {
+		const groupManiList = groupedManifestations[key];
+		const sourceManifestationIds = groupManiList.map(x => x.id);
+		const manifestationName = groupManiList[0].name;
+		const categoryId = groupManiList[0].category_id;
+		let manifestationId = manifestations.find(x => x.name == manifestationName)?.id;
+
+		if(!manifestationId) {
+			[res, err] = await client.exec(`
+			INSERT INTO manifestations (name,category_id) VALUES ($1,$2) RETURNING id
+			`, [manifestationName, categoryId]);
+			if(err) {
+				console.log("processSourceManifestations(): %s", err);
+				continue;
+			}
+			manifestationId = res.rows[0].id;
 		}
-		const manifestationId = res.rows[0].id;
 
 		[res, err] = await client.exec(`
 		UPDATE source_manifestations
@@ -176,7 +191,7 @@ async function processSourceManifestations() {
 		WHERE id = ANY($2)
 		`, [manifestationId, sourceManifestationIds]);
 		if(err) {
-			console.log("UPDATE source_manifestations: %s", err);
+			console.log("processSourceManifestations(): %s", err);
 			continue;
 		}
 
@@ -329,6 +344,13 @@ async function processSourceEvents() {
 				const items = updateInfos.filter(x => x.event_id == upd.data.id);
 				const info = items[0];
 
+				if(!info)
+					debugger;
+
+				/*
+				XXX
+				TypeError: Cannot read properties of undefined (reading 'gname')
+				*/
 				Object.assign(upd.data, {
 					groupName: info.gname,
 					categoryName: info.cname,
@@ -405,6 +427,11 @@ async function processEventsParticipants(eventIds) {
 
 	participants.forEach(p => p.key = cleanString(p.name));
 
+	/*
+	XXX
+	processEventsParticipants(): error: duplicate key value violates unique constraint "event_participants_pkey"
+	Key (event_id, participant_id)=(3932, 2837) already exists.'
+	*/
 	const newEventParticipants = sourceParticipants.map(sp => ({
 		event_id: sp.event_id,
 		participant_id: participants.find(p => p.key == cleanString(sp.name)).id,
@@ -414,8 +441,10 @@ async function processEventsParticipants(eventIds) {
 	[res, err] = await insertMany("event_participants",
 			["event_id", "participant_id", "team_name"], newEventParticipants,
 			null, client);
-	if(err)
+	if(err) {
 		console.log("processEventsParticipants(): %s", err);
+		debugger;
+	}
 
 	const updSourceParticipants = sourceParticipants.map(sp => ({
 		id: sp.id,
@@ -564,6 +593,10 @@ async function processSourceOutcomes() {
 		}
 	}
 
+	/*
+	XXX
+	TypeError: Cannot read properties of undefined (reading 'id')
+	*/
 	partialOutcomes.forEach(so => {
 		const upd = {
 			id: so.id,

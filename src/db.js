@@ -119,20 +119,20 @@ export async function updateMany(table, fields, items, primaryKeyOrKeys = "id") 
 
 export async function upsert(table, items, insertFields, conflictFields, changeFields, trackChanges = true) {
 	const client = await getClient();
-	const csvFields = insertFields.join(',');
 	const updatedAtValSql = "(NOW() at time zone 'utc')";
 	const sqlValues = [];
+	const fields = [...insertFields];
 	const values = [];
+	const trackSetItems = [];
 	let valIndex = 0;
 
 	if(trackChanges) {
 		const updChecks = changeFields.map(x => `${table}.${x} IS DISTINCT FROM EXCLUDED.${x}`).join(" OR ");
 
-		csvFields.push("updated_at");
-		changeFields.push(`updated_at = ${updatedAtValSql}`);
-		changeFields.push(`changed = CASE WHEN ${updChecks} THEN TRUE ELSE ${table}.changed END`);
+		fields.push("updated_at");
+		trackSetItems.push(`updated_at = ${updatedAtValSql}`);
+		trackSetItems.push(`changed = CASE WHEN ${updChecks} THEN TRUE ELSE ${table}.changed END`);
 	}
-
 
 	items.forEach(item => {
 		const curValues = [];
@@ -146,9 +146,13 @@ export async function upsert(table, items, insertFields, conflictFields, changeF
 		sqlValues.push(`(${curValues.join(',')})`);
 	});
 
-	const conflictSet = changeFields.map(x => `${x} = EXCLUDED.${x}`).join(',');
+	const conflictSet = [
+		...changeFields.map(x => `${x} = EXCLUDED.${x}`),
+		...trackSetItems
+	].join(',');
+
 	const sql = `
-	INSERT INTO ${table} (${csvFields})
+	INSERT INTO ${table} (${fields.join(',')})
 	VALUES ${sqlValues.join(',')}
 	ON CONFLICT (${conflictFields.join(',')}) DO UPDATE
 	SET ${conflictSet}
