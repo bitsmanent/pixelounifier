@@ -6,7 +6,15 @@
  */
 
 import {getClient,insertMany,updateMany,upsert} from "./db.js";
-import {cleanString,entityStatus,groupBy,matchStatus,outcomeStatus,sendUpdates} from "./lib.js";
+import {
+	cleanString,
+	entityStatus,
+	getISO8601,
+	groupBy,
+	matchStatus,
+	outcomeStatus,
+	sendUpdates
+} from "./lib.js";
 
 let client; /* shared between processors */
 
@@ -256,7 +264,7 @@ async function processSourceEvents() {
 			if(!eventId) {
 				[res, err] = await client.exec(`
 				INSERT INTO events (name,start_time,manifestation_id) VALUES ($1,$2,$3) RETURNING id
-				`, [eventName, eventDate, manifestationId]);
+				`, [eventName, getISO8601(eventDate), manifestationId]);
 				if(err) {
 					console.log("processSourceEvents(): %s", err);
 					continue;
@@ -269,7 +277,7 @@ async function processSourceEvents() {
 					data: {
 						state: matchStatus.ACTIVE, /* XXX are we sure it's active? */
 						id: eventId,
-						startTime: eventDate, /* XXX to ISO? */
+						startTime: eventDate,
 
 						/* filled later */
 						groupName: null,
@@ -344,13 +352,13 @@ async function processSourceEvents() {
 				const items = updateInfos.filter(x => x.event_id == upd.data.id);
 				const info = items[0];
 
-				if(!info)
-					debugger;
-
 				/*
 				XXX
 				TypeError: Cannot read properties of undefined (reading 'gname')
 				*/
+				if(!info)
+					debugger;
+
 				Object.assign(upd.data, {
 					groupName: info.gname,
 					categoryName: info.cname,
@@ -375,7 +383,7 @@ async function processEventsParticipants(eventIds) {
 	AND se.event_id = ANY($1)
 	AND se.external_id = sp.external_event_id
 	AND sp.participant_id IS NULL -- just to be sure
-	RETURNING sp.id,sp.name,se.event_id,sp.team_name
+	RETURNING sp.id,sp.name,sp.team_name,se.event_id
 	`, [eventIds]);
 
 	if(err) {
@@ -427,24 +435,26 @@ async function processEventsParticipants(eventIds) {
 
 	participants.forEach(p => p.key = cleanString(p.name));
 
-	/*
-	XXX
-	processEventsParticipants(): error: duplicate key value violates unique constraint "event_participants_pkey"
-	Key (event_id, participant_id)=(3932, 2837) already exists.'
-	*/
-	const newEventParticipants = sourceParticipants.map(sp => ({
-		event_id: sp.event_id,
-		participant_id: participants.find(p => p.key == cleanString(sp.name)).id,
-		team_name: sp.team_name
-	}));
+	let newEventParticipants = {};
+	sourceParticipants.forEach(sp => {
+		const participantId = participants.find(p => p.key == cleanString(sp.name)).id;
+		const k = [sp.event_id, sp.team_name, participantId].join('.');
+
+		if(newEventParticipants[k])
+			return;
+		newEventParticipants[k] = {
+			event_id: sp.event_id,
+			team_name: sp.team_name,
+			participant_id: participantId
+		};
+	});
+	newEventParticipants = Object.values(newEventParticipants);
 
 	[res, err] = await insertMany("event_participants",
 			["event_id", "participant_id", "team_name"], newEventParticipants,
 			null, client);
-	if(err) {
+	if(err)
 		console.log("processEventsParticipants(): %s", err);
-		debugger;
-	}
 
 	const updSourceParticipants = sourceParticipants.map(sp => ({
 		id: sp.id,
@@ -576,6 +586,12 @@ async function processSourceOutcomes() {
 	let outcomes = [], res, err;
 
 	if(outcomeNames.length) {
+		[res, err] = await upsert("outcomes", outcomeNames.map(x => ({name:x})), ["name"], ["name"], ["name"], false);
+		if(err) {
+			console.log("handleSourceOutcomes(): %s", err);
+			return;
+		}
+
 		[res, err] = await client.exec(`
 		SELECT id,name
 		FROM outcomes
@@ -585,22 +601,14 @@ async function processSourceOutcomes() {
 			console.log("handleSourceOutcomes(): %s", err);
 		else
 			outcomes = res.rows;
-
-		[res, err] = await upsert("outcomes", outcomeNames.map(x => ({name:x})), ["name"], ["name"], ["name"], false);
-		if(err) {
-			console.log("handleSourceOutcomes(): %s", err);
-			return;
-		}
 	}
 
-	/*
-	XXX
-	TypeError: Cannot read properties of undefined (reading 'id')
-	*/
 	partialOutcomes.forEach(so => {
+		const outcomeId = so.outcome_id || outcomes.find(x => x.name == so.name).id;
+
 		const upd = {
 			id: so.id,
-			outcome_id: so.outcome_id || outcomes.find(x => x.name == so.name).id,
+			outcome_id: outcomeId,
 			market_id: so.market_id || so.real_market_id,
 			event_id: so.event_id || so.real_event_id
 		};
@@ -716,6 +724,7 @@ async function handleUpdates(updates) {
 }
 
 export async function processDataSources() {
+	console.log("Starting processing at %s", new Date());
 	client = await getClient();
 	const updates = [
 		...await processSourceGroups(),
@@ -726,5 +735,10 @@ export async function processDataSources() {
 		...await processSourceOutcomes()
 	];
 	client.release();
-	handleUpdates(updates);
+	console.log("Finish processing at %s", new Date());
+	if(updates.length) {
+		console.log("Sending updates...");
+		handleUpdates(updates);
+		console.log("Sent %d update(s).", updates.length);
+	}
 }
