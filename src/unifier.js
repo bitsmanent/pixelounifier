@@ -1,3 +1,12 @@
+/*
+ * TODO
+ *
+ * - we may only send event_id for example when removing an entity instead of
+ *   also sending group/cate/mani because we have unique event IDs regardless
+ *   on the hierachy. This would help to simplify the SQL code and reduce the
+ *   number of JOINs. Maybe not only when removing entities.
+*/
+
 import {getClient,insertMany,updateMany,upsert} from "./db.js";
 import {
 	cleanString,
@@ -235,7 +244,7 @@ async function getRemovedSourceEvents() {
 	JOIN categories c ON c.id = m.category_id
 	WHERE e.state = $2
 	AND e.id IN (
-	    SELECT se.id
+	    SELECT se.event_id
 	    FROM source_events se
 	    WHERE updated_at < (
 		SELECT MAX(updated_at)
