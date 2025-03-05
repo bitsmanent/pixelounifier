@@ -13,7 +13,8 @@ export const entityTypes = {
 
 export const entityStatus = {
 	CREATED: 1,
-	UPDATED: 2
+	UPDATED: 2,
+	REMOVED: 3
 };
 
 export const matchStatus = {
@@ -23,8 +24,7 @@ export const matchStatus = {
 
 export const outcomeStatus = {
 	ACTIVE: 1,
-	DISABLED: 2,
-	REMOVED: 3
+	DISABLED: 2
 };
 
 const getIdData = {

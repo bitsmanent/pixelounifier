@@ -1,10 +1,3 @@
-/*
- * TODO
- *
- * - Add team_name into event_participants?
- * - Use bulk updates/insert whenever possible.
- */
-
 import {getClient,insertMany,updateMany,upsert} from "./db.js";
 import {
 	cleanString,
@@ -234,8 +227,36 @@ async function getSourceEvents() {
 	return res.rows;
 }
 
+async function getRemovedSourceEvents() {
+	const [res, err] = await client.exec(`
+	UPDATE events e
+	SET state = 2
+	FROM manifestations m
+	JOIN categories c ON c.id = m.category_id
+	WHERE e.id IN (
+	    SELECT se.id
+	    FROM source_events se
+	    WHERE updated_at < (
+		SELECT MAX(updated_at)
+		FROM source_events se2
+		WHERE se2.source = se.source
+		AND se2.external_manifestation_id = se.external_manifestation_id
+	    )
+	)
+	AND m.id = e.manifestation_id 
+	RETURNING e.id,e.manifestation_id,m.category_id,c.group_id
+	`);
+
+	if(err) {
+		console.log("getRemovedSourceEvents(): %s", err);
+		return [];
+	}
+	return res.rows;
+}
+
 async function processSourceEvents() {
 	const sourceEvents = await getSourceEvents();
+	const removedSourceEvents = await getRemovedSourceEvents();
 	const groupedEvents = groupBy(sourceEvents, x => x.event_id || cleanString(x.name));
 	const newEventIds = [];
 	const updates = [];
@@ -262,9 +283,11 @@ async function processSourceEvents() {
 			*/
 
 			if(!eventId) {
+				const eventState = matchStatus.ACTIVE; /* XXX are we sure it's active? */
+
 				[res, err] = await client.exec(`
-				INSERT INTO events (name,start_time,manifestation_id) VALUES ($1,$2,$3) RETURNING id
-				`, [eventName, getISO8601(eventDate), manifestationId]);
+				INSERT INTO events (name,start_time,manifestation_id,state) VALUES ($1,$2,$3,$4) RETURNING id
+				`, [eventName, getISO8601(eventDate), manifestationId, eventState]);
 				if(err) {
 					console.log("processSourceEvents(): %s", err);
 					continue;
@@ -275,7 +298,7 @@ async function processSourceEvents() {
 					type: "event",
 					state: entityStatus.CREATED,
 					data: {
-						state: matchStatus.ACTIVE, /* XXX are we sure it's active? */
+						state: eventState,
 						id: eventId,
 						startTime: eventDate,
 
@@ -369,6 +392,17 @@ async function processSourceEvents() {
 			});
 		}
 	}
+
+	if(removedSourceEvents.length) {
+		removedSourceEvents.forEach(se => {
+			updates.push({
+				type: "event",
+				state: entityStatus.REMOVED,
+				data: se
+			});
+		});
+	}
+
 	return updates;
 }
 
