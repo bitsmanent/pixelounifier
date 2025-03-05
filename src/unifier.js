@@ -230,10 +230,11 @@ async function getSourceEvents() {
 async function getRemovedSourceEvents() {
 	const [res, err] = await client.exec(`
 	UPDATE events e
-	SET state = 2
+	SET state = $1
 	FROM manifestations m
 	JOIN categories c ON c.id = m.category_id
-	WHERE e.id IN (
+	WHERE e.state = $2
+	AND e.id IN (
 	    SELECT se.id
 	    FROM source_events se
 	    WHERE updated_at < (
@@ -244,8 +245,8 @@ async function getRemovedSourceEvents() {
 	    )
 	)
 	AND m.id = e.manifestation_id 
-	RETURNING e.id,e.manifestation_id,m.category_id,c.group_id
-	`);
+	RETURNING e.id,e.manifestation_id,m.category_id,c.group_id,e.state
+	`, [matchStatus.DISABLED, matchStatus.ACTIVE]);
 
 	if(err) {
 		console.log("getRemovedSourceEvents(): %s", err);
