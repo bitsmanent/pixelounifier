@@ -5,6 +5,9 @@
  *   also sending group/cate/mani because we have unique event IDs regardless
  *   on the hierachy. This would help to simplify the SQL code and reduce the
  *   number of JOINs. Maybe not only when removing entities.
+ *
+ * - handle removed events event/outcomes even if the whole
+ *   manifestation/category/group is not received anymore.
 */
 
 import {getClient,insertMany,updateMany,upsert} from "./db.js";
@@ -272,6 +275,19 @@ async function processSourceEvents() {
 	const updates = [];
 	let res, err;
 
+	if(removedSourceEvents.length) {
+		removedSourceEvents.forEach(se => {
+			updates.push({
+				type: "event",
+				state: entityStatus.REMOVED,
+				data: se
+			});
+		});
+	}
+
+	if(!sourceEvents.length)
+		return updates;
+
 	for(const key in groupedEvents) {
 		const events = groupedEvents[key];
 		const sourceEventIds = events.map(x => x.id);
@@ -401,16 +417,6 @@ async function processSourceEvents() {
 				});
 			});
 		}
-	}
-
-	if(removedSourceEvents.length) {
-		removedSourceEvents.forEach(se => {
-			updates.push({
-				type: "event",
-				state: entityStatus.REMOVED,
-				data: se
-			});
-		});
 	}
 
 	return updates;
@@ -616,16 +622,52 @@ async function getSourceOutcomes() {
 	return res.rows;
 }
 
+async function getRemovedSourceOutcomes() {
+	const [res, err] = await client.exec(`
+	UPDATE event_outcomes eo
+	SET state = 2
+	WHERE eo.state = 1
+	AND eo.event_id IN (
+	    SELECT so.event_id
+	    FROM source_outcomes so
+	    WHERE updated_at < (
+		SELECT MAX(updated_at)
+		FROM source_outcomes so2
+		WHERE so2.source = so.source
+		AND so2.event_id = so.event_id
+	    )
+	)
+	RETURNING eo.event_id,eo.market_id,eo.outcome_id,eo.state
+	`, []);
+
+	if(err) {
+		console.log("getRemovedSourceOutcomes(): %s", err);
+		return [];
+	}
+	return res.rows;
+}
+
 async function processSourceOutcomes() {
 	const sourceOutcomes = await getSourceOutcomes();
+	const removedSourceEvents = await getRemovedSourceEvents();
+	const updates = [];
+
+	if(removedSourceEvents.length) {
+		removedSourceEvents.forEach(se => {
+			updates.push({
+				type: "event",
+				state: entityStatus.REMOVED,
+				data: se
+			});
+		});
+	}
 
 	if(!sourceOutcomes.length)
-		return [];
+		return updates;
 
 	const partialOutcomes = sourceOutcomes.filter(x => !x.outcome_id || !x.market_id || !x.event_id);
 	const outcomeNames = [...new Set(partialOutcomes.filter(x => !x.outcome_id).map(x => x.name))];
 	const updSourceOutcomes = [];
-	const updates = [];
 	let fullOutcomesUpdates = [];
 	let outcomes = [], res, err;
 
