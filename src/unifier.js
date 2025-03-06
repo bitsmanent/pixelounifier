@@ -619,8 +619,8 @@ async function getSourceOutcomes() {
 async function getRemovedSourceOutcomes() {
 	const [res, err] = await client.exec(`
 	UPDATE event_outcomes eo
-	SET state = 2
-	WHERE eo.state = 1
+	SET state = $1
+	WHERE eo.state = $2
 	AND eo.event_id IN (
 	    SELECT so.event_id
 	    FROM source_outcomes so
@@ -632,7 +632,7 @@ async function getRemovedSourceOutcomes() {
 	    )
 	)
 	RETURNING eo.event_id,eo.market_id,eo.outcome_id,eo.state
-	`, []);
+	`, [outcomeStatus.DISABLED, outcomeStatus.ACTIVE]);
 
 	if(err) {
 		console.log("getRemovedSourceOutcomes(): %s", err);
@@ -649,7 +649,7 @@ async function processSourceOutcomes() {
 	if(removedSourceEvents.length) {
 		removedSourceEvents.forEach(se => {
 			updates.push({
-				type: "event",
+				type: "game",
 				state: entityStatus.REMOVED,
 				data: se
 			});
