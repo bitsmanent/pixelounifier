@@ -41,27 +41,43 @@ async function processSourceGroups() {
 	const sourceGroups = await getSourceGroups();
 	const groupedGroups = groupBy(sourceGroups, x => cleanString(x.name));
 	const updates = [];
+	let res, err;
 
-	for(const group in groupedGroups) {
-		const groups = groupedGroups[group];
-		const sourceGroupIds = groups.map(x => x.id);
-		const groupName = groups[0].name;
-		let res, err;
+	const groupNames = [...new Set(Object.values(groupedGroups).map(x => x[0].name))];
+	[res, err] = await client.exec(`
+	SELECT id,name,LOWER(name) as lowername
+	FROM groups
+	WHERE LOWER(name) = ANY($1)
+	GROUP BY id,LOWER(name)
+	`, [groupNames.map(x => x.toLowerCase())]);
+	if(err) {
+		console.log("processSourceGroups(): %s", err);
+		return [];
+	}
+	const groups = res.rows;
 
-		[res, err] = await client.exec(`
-		INSERT INTO groups (name) VALUES ($1) RETURNING id
-		`, [groupName]);
-		if(err) {
-			console.log("INSERT INTO groups: %s", err);
-			continue;
+	for(const key in groupedGroups) {
+		const groupList = groupedGroups[key];
+		const firstGroupName = groupList[0].name;
+		let group = groups.find(x => x.lowername == firstGroupName.toLowerCase());
+
+		if(!group) {
+			[res, err] = await client.exec(`
+			INSERT INTO groups (name) VALUES ($1) RETURNING id,name
+			`, [firstGroupName]);
+			if(err) {
+				console.log("INSERT INTO groups: %s", err);
+				continue;
+			}
+			group = res.rows[0];
 		}
-		const groupId = res.rows[0].id;
 
+		const sourceGroupIds = groupList.map(x => x.id);
 		[res, err] = await client.exec(`
 		UPDATE source_groups
 		SET group_id = $1
 		WHERE id = ANY($2)
-		`, [groupId, sourceGroupIds]);
+		`, [group.id, sourceGroupIds]);
 		if(err) {
 			console.log("UPDATE source_groups: %s", err);
 			continue;
@@ -71,8 +87,8 @@ async function processSourceGroups() {
 			type: "group",
 			state: entityStatus.CREATED,
 			data: {
-				id: groupId,
-				name: groupName
+				id: group.id,
+				name: group.name
 			}
 		});
 	}
@@ -102,28 +118,45 @@ async function processSourceCategories() {
 	const sourceCategories = await getSourceCategories();
 	const groupedCategories = groupBy(sourceCategories, x => cleanString(x.name));
 	const updates = [];
+	let res, err;
 
-	for(const category in groupedCategories) {
-		const categories = groupedCategories[category];
-		const sourceCategoryIds = categories.map(x => x.id);
-		const categoryName = categories[0].name;
-		const groupId = categories[0].group_id;
-		let res, err;
+	const categoryNames = [...new Set(Object.values(groupedCategories).map(x => x[0].name))];
+	/* XXX fetchLowerNames("categories", categoryNames) */
+	[res, err] = await client.exec(`
+	SELECT id,name,LOWER(name) as lowername
+	FROM categories
+	WHERE LOWER(name) = ANY($1)
+	GROUP BY id,LOWER(name)
+	`, [categoryNames.map(x => x.toLowerCase())]);
+	if(err) {
+		console.log("processSourceCategories(): %s", err);
+		return [];
+	}
+	const categories = res.rows;
 
-		[res, err] = await client.exec(`
-		INSERT INTO categories (name,group_id) VALUES ($1,$2) RETURNING id
-		`, [categoryName, groupId]);
-		if(err) {
-			console.log("INSERT INTO categories: %s", err);
-			continue;
+	for(const key in groupedCategories) {
+		const categoryList = groupedCategories[key];
+		const firstCategoryName = categoryList[0].name;
+		const groupId = categoryList[0].group_id;
+		let category = categories.find(x => x.lowername == firstCategoryName.toLowerCase());
+
+		if(!category) {
+			[res, err] = await client.exec(`
+			INSERT INTO categories (name,group_id) VALUES ($1,$2) RETURNING id,name
+			`, [firstCategoryName, groupId]);
+			if(err) {
+				console.log("INSERT INTO categories: %s", err);
+				continue;
+			}
+			category = res.rows[0];
 		}
-		const categoryId = res.rows[0].id;
 
+		const sourceCategoryIds = categoryList.map(x => x.id);
 		[res, err] = await client.exec(`
 		UPDATE source_categories
 		SET category_id = $1
 		WHERE id = ANY($2)
-		`, [categoryId, sourceCategoryIds]);
+		`, [category.id, sourceCategoryIds]);
 		if(err) {
 			console.log("UPDATE source_categories: %s", err);
 			continue;
@@ -133,8 +166,8 @@ async function processSourceCategories() {
 			type: "category",
 			state: entityStatus.CREATED,
 			data: {
-				id: categoryId,
-				name: categoryName,
+				id: category.id,
+				name: category.name,
 				groupId
 			}
 		});
@@ -169,10 +202,11 @@ async function processSourceManifestations() {
 	let res, err;
 
 	[res, err] = await client.exec(`
-	SELECT id,name
+	SELECT id,name,LOWER(name) as lowername
 	FROM manifestations
-	WHERE name = ANY($1)
-	`, [maniNames]);
+	WHERE LOWER(name) = ANY($1)
+	GROUP BY id,LOWER(name)
+	`, [maniNames.map(x => x.toLowerCase())]);
 	if(err) {
 		console.log("processSourceManifestations(): %s", err);
 		return [];
@@ -182,26 +216,26 @@ async function processSourceManifestations() {
 	for(const key in groupedManifestations) {
 		const groupManiList = groupedManifestations[key];
 		const sourceManifestationIds = groupManiList.map(x => x.id);
-		const manifestationName = groupManiList[0].name;
+		const firstManiName = groupManiList[0].name;
 		const categoryId = groupManiList[0].category_id;
-		let manifestationId = manifestations.find(x => x.name == manifestationName)?.id;
+		let manifestation = manifestations.find(x => x.lowername == firstManiName.toLowerCase());
 
-		if(!manifestationId) {
+		if(!manifestation) {
 			[res, err] = await client.exec(`
-			INSERT INTO manifestations (name,category_id) VALUES ($1,$2) RETURNING id
-			`, [manifestationName, categoryId]);
+			INSERT INTO manifestations (name,category_id) VALUES ($1,$2) RETURNING id,name
+			`, [firstManiName, categoryId]);
 			if(err) {
 				console.log("processSourceManifestations(): %s", err);
 				continue;
 			}
-			manifestationId = res.rows[0].id;
+			manifestation = res.rows[0];
 		}
 
 		[res, err] = await client.exec(`
 		UPDATE source_manifestations
 		SET manifestation_id = $1
 		WHERE id = ANY($2)
-		`, [manifestationId, sourceManifestationIds]);
+		`, [manifestation.id, sourceManifestationIds]);
 		if(err) {
 			console.log("processSourceManifestations(): %s", err);
 			continue;
@@ -211,8 +245,8 @@ async function processSourceManifestations() {
 			type: "manifestation",
 			state: entityStatus.CREATED,
 			data: {
-				id: manifestationId,
-				name: manifestationName,
+				id: manifestation.id,
+				name: manifestation.name,
 				categoryId
 			}
 		});
@@ -604,7 +638,7 @@ async function getSourceOutcomes() {
 	AND se.external_id = so.external_event_id
 	AND sm.external_id = so.external_market_id
 	AND sm.market_id IS NOT NULL
-	RETURNING so.id,so.source,so.name,so.value,so.updated_at
+	RETURNING so.id,so.source,so.name,so.value,so.updated_at,so.state
 	,so.outcome_id,so.market_id,so.event_id
 	,sm.market_id as real_market_id,se.event_id as real_event_id
 	,(select name from outcomes where id = so.outcome_id) as outcomename
