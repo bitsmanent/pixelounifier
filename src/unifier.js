@@ -17,8 +17,7 @@ import {
 	getISO8601,
 	groupBy,
 	matchStatus,
-	outcomeStatus,
-	sendUpdates
+	outcomeStatus
 } from "./lib.js";
 
 let client; /* shared between processors */
@@ -227,7 +226,9 @@ async function getSourceEvents() {
 	UPDATE source_events se
 	SET changed = FALSE
 	FROM source_manifestations sm
-	WHERE se.changed = TRUE AND sm.external_id = se.external_manifestation_id
+	WHERE se.changed = TRUE
+	AND sm.external_id = se.external_manifestation_id
+	AND sm.manifestation_id IS NOT NULL
 	RETURNING se.id,se.source,se.name,se.date,sm.manifestation_id,se.event_id
 	,(select start_time from events e where e.id = se.event_id) as start_time
 	`);
@@ -400,13 +401,6 @@ async function processSourceEvents() {
 			eventUpdates.forEach(upd => {
 				const items = updateInfos.filter(x => x.event_id == upd.data.id);
 				const info = items[0];
-
-				/*
-				XXX
-				TypeError: Cannot read properties of undefined (reading 'gname')
-				*/
-				if(!info)
-					debugger;
 
 				Object.assign(upd.data, {
 					groupName: info.gname,

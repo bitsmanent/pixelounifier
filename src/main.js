@@ -1,5 +1,6 @@
 import dotenvx from "@dotenvx/dotenvx";
 import {processDataSources} from "./unifier.js";
+import {sendUpdates} from "./lib.js";
 
 dotenvx.config();
 
