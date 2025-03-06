@@ -792,25 +792,7 @@ async function processFullOutcomes(fullOutcomes) {
 	return updates;
 }
 
-async function handleUpdates(updates) {
-	if(!updates.length)
-		return;
-
-	const groups = updates.reduce((acc, upd) => {
-		const groupName = upd.type+"_list";
-		if(!acc[groupName])
-			acc[groupName] = [];
-		acc[groupName].push(upd);
-		return acc;
-	}, {});
-
-	Object.keys(groups).forEach(groupName => {
-		sendUpdates(groupName, groups[groupName]);
-	});
-}
-
 export async function processDataSources() {
-	console.log("Starting processing at %s", new Date());
 	client = await getClient();
 	const updates = [
 		...await processSourceGroups(),
@@ -821,10 +803,5 @@ export async function processDataSources() {
 		...await processSourceOutcomes()
 	];
 	client.release();
-	console.log("Finish processing at %s", new Date());
-	if(updates.length) {
-		console.log("Sending updates...");
-		handleUpdates(updates);
-		console.log("Sent %d update(s).", updates.length);
-	}
+	return updates;
 }
