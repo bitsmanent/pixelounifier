@@ -67,12 +67,10 @@ export function groupBy(items, getKey, getVal) {
 }
 
 export async function sendUpdates(type, data) {
-	const rmqConfig = {
-		host: "rabbittest.pixelo.it",
-		port: 5672,
-		vhost: "Grabber",
-		queue: "grabber",
-	};
+	const host = process.env.RMQHOST;
+	const port = process.env.RMQPORT;
+	const vhost = process.env.RMQVHOST;
+	const queue = process.env.RMQQUEUE;
 	const user = process.env.RMQUSER;
 	const pass = process.env.RMQPASS;
 	let conn, chan;
@@ -82,9 +80,9 @@ export async function sendUpdates(type, data) {
 
 	if(!conn) {
 		try {
-			conn = await amqp.connect(`amqp://${user}:${pass}@${rmqConfig.host}:${rmqConfig.port}/${rmqConfig.vhost}`);
+			conn = await amqp.connect(`amqp://${user}:${pass}@${host}:${port}/${vhost}`);
 			chan = await conn.createChannel();
-			await chan.assertQueue(rmqConfig.queue, {durable: true});
+			await chan.assertQueue(queue, {durable: true});
 		} catch(e) {
 			console.log("Error initializing RMQ: %s", e);
 			return e.message;
@@ -98,7 +96,7 @@ export async function sendUpdates(type, data) {
 		const payload = {type,data,ts:getISO8601()};
 		const buffer = Buffer.from(JSON.stringify(payload));
 
-		chan.sendToQueue(rmqConfig.queue, buffer, {
+		chan.sendToQueue(queue, buffer, {
 			persistent: true,
 			headers: {
 				MessageType: type,
