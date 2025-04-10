@@ -17,7 +17,8 @@ import {
 	getISO8601,
 	groupBy,
 	matchStatus,
-	outcomeStatus
+	outcomeStatus,
+	sourceStatus
 } from "./lib.js";
 
 let client; /* shared between processors */
@@ -25,10 +26,10 @@ let client; /* shared between processors */
 async function getSourceGroups() {
 	const [res, err] = await client.exec(`
 	UPDATE source_groups
-	SET changed = FALSE
-	WHERE changed = TRUE AND group_id IS NULL
-	RETURNING id,source,name
-	`);
+	SET status = $1
+	WHERE status != $1
+	RETURNING id,source,name,group_id
+	`, [sourceStatus.RESET]);
 
 	if(err) {
 		console.log("getSourceGroups(): %s", err);
@@ -39,17 +40,18 @@ async function getSourceGroups() {
 
 async function processSourceGroups() {
 	const sourceGroups = await getSourceGroups();
-	const groupedGroups = groupBy(sourceGroups, x => cleanString(x.name));
+	const groupedGroups = groupBy(sourceGroups, x => x.group_id || cleanString(x.name));
+	const groupNames = [...new Set(Object.values(groupedGroups).map(x => x[0].name))];
+	const groupIds = sourceGroups.filter(x => x.group_id).map(x => x.group_id);
 	const updates = [];
 	let res, err;
 
-	const groupNames = [...new Set(Object.values(groupedGroups).map(x => x[0].name))];
 	[res, err] = await client.exec(`
 	SELECT id,name,LOWER(name) as lowername
 	FROM groups
-	WHERE LOWER(name) = ANY($1)
+	WHERE LOWER(name) = ANY($1) OR id = ANY($2)
 	GROUP BY id,LOWER(name)
-	`, [groupNames.map(x => x.toLowerCase())]);
+	`, [groupNames.map(x => x.toLowerCase()), groupIds]);
 	if(err) {
 		console.log("processSourceGroups(): %s", err);
 		return [];
@@ -59,8 +61,22 @@ async function processSourceGroups() {
 	for(const key in groupedGroups) {
 		const groupList = groupedGroups[key];
 		const firstGroupName = groupList[0].name;
-		let group = groups.find(x => x.lowername == firstGroupName.toLowerCase());
+		let groupId = groupList[0].group_id;
+		let group;
 
+		if(groupId) {
+			group = groups.find(x => x.id == groupId);
+			updates.push({
+				type: "group",
+				data: {
+					id: group.id,
+					name: group.name
+				}
+			});
+			continue;
+		}
+
+		group = groups.find(x => x.lowername == firstGroupName.toLowerCase());
 		if(!group) {
 			[res, err] = await client.exec(`
 			INSERT INTO groups (name) VALUES ($1) RETURNING id,name
@@ -85,7 +101,6 @@ async function processSourceGroups() {
 
 		updates.push({
 			type: "group",
-			state: entityStatus.CREATED,
 			data: {
 				id: group.id,
 				name: group.name
@@ -99,13 +114,13 @@ async function processSourceGroups() {
 async function getSourceCategories() {
 	const [res, err] = await client.exec(`
 	UPDATE source_categories sc
-	SET changed = FALSE
+	SET status = $1
 	FROM source_groups sg
-	WHERE sc.changed = TRUE
-	AND sc.category_id IS NULL AND sg.group_id IS NOT NULL
+	WHERE sc.status != $1
+	AND sg.group_id IS NOT NULL
 	AND sg.external_id = sc.external_group_id
-	RETURNING sc.id,sc.source,sc.name,sg.group_id
-	`);
+	RETURNING sc.id,sc.source,sc.name,sc.category_id,sg.group_id
+	`, [sourceStatus.RESET]);
 
 	if(err) {
 		console.log("getSourceManifestations(): %s", err);
@@ -116,18 +131,19 @@ async function getSourceCategories() {
 
 async function processSourceCategories() {
 	const sourceCategories = await getSourceCategories();
-	const groupedCategories = groupBy(sourceCategories, x => cleanString(x.name));
+	const groupedCategories = groupBy(sourceCategories, x => x.category_id || cleanString(x.name));
+	const categoryNames = [...new Set(Object.values(groupedCategories).map(x => x[0].name))];
+	const categoryIds = sourceCategories.filter(x => x.category_id).map(x => x.category_id);
 	const updates = [];
 	let res, err;
 
-	const categoryNames = [...new Set(Object.values(groupedCategories).map(x => x[0].name))];
 	/* XXX fetchLowerNames("categories", categoryNames) */
 	[res, err] = await client.exec(`
 	SELECT id,name,LOWER(name) as lowername
 	FROM categories
-	WHERE LOWER(name) = ANY($1)
+	WHERE LOWER(name) = ANY($1) OR id = ANY($2)
 	GROUP BY id,LOWER(name)
-	`, [categoryNames.map(x => x.toLowerCase())]);
+	`, [categoryNames.map(x => x.toLowerCase()), categoryIds]);
 	if(err) {
 		console.log("processSourceCategories(): %s", err);
 		return [];
@@ -138,8 +154,23 @@ async function processSourceCategories() {
 		const categoryList = groupedCategories[key];
 		const firstCategoryName = categoryList[0].name;
 		const groupId = categoryList[0].group_id;
-		let category = categories.find(x => x.lowername == firstCategoryName.toLowerCase());
+		let categoryId = categoryList[0].category_id;
+		let category;
 
+		if(categoryId) {
+			category = categories.find(x => x.id == categoryId);
+			updates.push({
+				type: "category",
+				data: {
+					id: category.id,
+					name: category.name,
+					groupId
+				}
+			});
+			continue;
+		}
+
+		category = categories.find(x => x.lowername == firstCategoryName.toLowerCase());
 		if(!category) {
 			[res, err] = await client.exec(`
 			INSERT INTO categories (name,group_id) VALUES ($1,$2) RETURNING id,name
@@ -164,7 +195,6 @@ async function processSourceCategories() {
 
 		updates.push({
 			type: "category",
-			state: entityStatus.CREATED,
 			data: {
 				id: category.id,
 				name: category.name,
@@ -179,13 +209,13 @@ async function processSourceCategories() {
 async function getSourceManifestations() {
 	const [res, err] = await client.exec(`
 	UPDATE source_manifestations sm
-	SET changed = FALSE
+	SET status = $1
 	FROM source_categories sc
-	WHERE sm.changed = TRUE
-	AND sm.manifestation_id IS NULL AND sc.category_id IS NOT NULL
+	WHERE sm.status != $1
+	AND sc.category_id IS NOT NULL
 	AND sc.external_id = sm.external_category_id
-	RETURNING sm.id,sm.source,sm.name,sc.category_id
-	`);
+	RETURNING sm.id,sm.source,sm.name,sm.manifestation_id,sc.category_id
+	`, [sourceStatus.RESET]);
 
 	if(err) {
 		console.log("getSourceManifestations(): %s", err);
@@ -196,17 +226,18 @@ async function getSourceManifestations() {
 
 async function processSourceManifestations() {
 	const sourceManifestations = await getSourceManifestations();
-	const groupedManifestations = groupBy(sourceManifestations, x => cleanString(x.name));
+	const groupedManifestations = groupBy(sourceManifestations, x => x.manifestation_id || cleanString(x.name));
 	const maniNames = [...new Set(sourceManifestations.map(x => x.name))];
+	const manifestationIds = sourceManifestations.filter(x => x.manifestation_id).map(x => x.manifestation_id);
 	const updates = [];
 	let res, err;
 
 	[res, err] = await client.exec(`
 	SELECT id,name,LOWER(name) as lowername
 	FROM manifestations
-	WHERE LOWER(name) = ANY($1)
+	WHERE LOWER(name) = ANY($1) OR id = ANY($2)
 	GROUP BY id,LOWER(name)
-	`, [maniNames.map(x => x.toLowerCase())]);
+	`, [maniNames.map(x => x.toLowerCase()), manifestationIds]);
 	if(err) {
 		console.log("processSourceManifestations(): %s", err);
 		return [];
@@ -218,8 +249,23 @@ async function processSourceManifestations() {
 		const sourceManifestationIds = groupManiList.map(x => x.id);
 		const firstManiName = groupManiList[0].name;
 		const categoryId = groupManiList[0].category_id;
-		let manifestation = manifestations.find(x => x.lowername == firstManiName.toLowerCase());
+		let manifestationId = groupManiList[0].manifestation_id;
+		let manifestation;
 
+		if(manifestationId) {
+			manifestation = manifestations.find(x => x.id == manifestationId);
+			updates.push({
+				type: "manifestation",
+				data: {
+					id: manifestation.id,
+					name: manifestation.name,
+					categoryId
+				}
+			});
+			continue;
+		}
+
+		manifestation = manifestations.find(x => x.lowername == firstManiName.toLowerCase());
 		if(!manifestation) {
 			[res, err] = await client.exec(`
 			INSERT INTO manifestations (name,category_id) VALUES ($1,$2) RETURNING id,name
@@ -243,7 +289,6 @@ async function processSourceManifestations() {
 
 		updates.push({
 			type: "manifestation",
-			state: entityStatus.CREATED,
 			data: {
 				id: manifestation.id,
 				name: manifestation.name,
@@ -328,6 +373,7 @@ async function processSourceEvents() {
 		const sourceEventIds = events.map(x => x.id);
 		const eventName = events[0].name;
 		const eventDate = events[0].date;
+		const eventState = matchStatus.ACTIVE; /* XXX are we sure it's active? */
 		const manifestationId = events[0].manifestation_id;
 		let eventId = events[0].event_id;
 
@@ -344,8 +390,6 @@ async function processSourceEvents() {
 			*/
 
 			if(!eventId) {
-				const eventState = matchStatus.ACTIVE; /* XXX are we sure it's active? */
-
 				[res, err] = await client.exec(`
 				INSERT INTO events (name,start_time,manifestation_id,state) VALUES ($1,$2,$3,$4) RETURNING id
 				`, [eventName, getISO8601(eventDate), manifestationId, eventState]);
@@ -355,24 +399,24 @@ async function processSourceEvents() {
 				}
 				eventId = res.rows[0].id;
 				newEventIds.push(eventId);
-				updates.push({
-					type: "event",
-					state: entityStatus.CREATED,
-					data: {
-						state: eventState,
-						id: eventId,
-						startTime: eventDate,
-
-						/* filled later */
-						groupName: null,
-						categoryName: null,
-						manifestationName: null,
-						homeTeam: null,
-						awayTeam: null
-					}
-				});
 			}
 		}
+
+		updates.push({
+			type: "event",
+			data: {
+				state: eventState,
+				id: eventId,
+				startTime: eventDate,
+
+				/* filled later */
+				groupName: null,
+				categoryName: null,
+				manifestationName: null,
+				homeTeam: null,
+				awayTeam: null
+			}
+		});
 
 		const toMapIds = [];
 		sourceEventIds.forEach(id => {
@@ -394,11 +438,13 @@ async function processSourceEvents() {
 			}
 		}
 
+		/*
 		const isDateChanged = events.some(x => x.start_time && x.start_time.getTime() != eventDate.getTime());
 
 		if(isDateChanged) {
-			/* TODO: handle data change in one or more sources */
+			// TODO: handle data change in one or more sources
 		}
+		*/
 	}
 
 	/* We can assume events and participants always comes together.
@@ -407,7 +453,8 @@ async function processSourceEvents() {
 	if(newEventIds.length)
 		await processEventsParticipants(newEventIds);
 
-	const eventUpdates = updates.filter(x => x.type == "event" && x.state == entityStatus.CREATED);
+	//const eventUpdates = updates.filter(x => x.type == "event" && x.state == entityStatus.CREATED);
+	const eventUpdates = updates;
 
 	if(eventUpdates.length) {
 		/* TODO: this should be further optimized since processEventsParticipants()

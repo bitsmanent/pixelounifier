@@ -27,6 +27,12 @@ export const outcomeStatus = {
 	DISABLED: 2
 };
 
+export const sourceStatus = {
+	RESET: 0,
+	RECEIVED: 1,
+	UPDATED: 2
+};
+
 const getIdData = {
 	lastNow: 0,
 	lastIndex: 0
